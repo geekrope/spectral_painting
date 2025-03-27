@@ -1,5 +1,5 @@
 const settings = {
-    frequency_range: { low: 100, high: 20000 },
+    frequency_range: { low: 50, high: 20000 },
     rate: 5,
     box: { x: 100, y: 100, width: 500, height: 500 },
     origin: { x: 350, y: 350 },
@@ -193,10 +193,9 @@ function get_caret_position(time_stamp) {
     return (time_stamp / settings.rate) * settings.box.width + settings.box.x;
 }
 function normalize(position) {
-    const frequency_range = settings.frequency_range.high;
-    const bias = Math.log(settings.frequency_range.low) / Math.log(frequency_range);
+    const bias = Math.log(settings.frequency_range.low) / Math.log(settings.frequency_range.high);
     const ratio = (position - settings.box.y) / settings.box.height;
-    return Math.pow(frequency_range, (1 - ratio) * (1 - bias) + bias);
+    return Math.pow(settings.frequency_range.high, (1 - ratio) * (1 - bias) + bias);
 }
 function find_intersection(position, anchor1, anchor2) {
     const a = (-anchor1.y + anchor2.y);
@@ -233,7 +232,7 @@ function transcribe_user_shape() {
             }
             else {
                 if (frequencies[index].length == 0) {
-                    markers[index] = { start: shifted_time, end: 0 };
+                    markers[index] = { start: shifted_time, end: audio_context.currentTime + settings.rate };
                 }
                 frequencies[index].push(normalize(intersection.y));
             }

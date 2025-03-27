@@ -1,5 +1,5 @@
 ﻿const settings = {
-	frequency_range: { low: 100, high: 20000 },
+	frequency_range: { low: 50, high: 20000 },
 	rate: 5,
 	box: { x: 100, y: 100, width: 500, height: 500 },
 	origin: { x: 350, y: 350 },
@@ -331,7 +331,7 @@ function transcribe_user_shape(): { frequencies: number[][], markers: { start: n
 			{
 				if (frequencies[index].length == 0)
 				{
-					markers[index] = { start: shifted_time, end: 0 };
+					markers[index] = { start: shifted_time, end: audio_context.currentTime + settings.rate };
 				}
 				frequencies[index].push(normalize(intersection.y));
 			}
