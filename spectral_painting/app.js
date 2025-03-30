@@ -61,9 +61,64 @@ class Point {
         return new Point(angle, dist({ x: x, y: y }, { x: origin_x, y: origin_y }), origin_x, origin_y);
     }
 }
+class LHPassFilter {
+    constructor(steep, audio_context) {
+        this._gain_node = audio_context.createGain();
+        this._gain_node.gain.value = 0;
+        this._low_pass = [];
+        this._high_pass = [];
+        let prev = undefined;
+        for (let index = 0; index < steep; index++) {
+            const filter = audio_context.createBiquadFilter();
+            filter.type = "lowpass";
+            this._low_pass.push(filter);
+            if (prev) {
+                prev.connect(filter);
+            }
+            prev = filter;
+        }
+        for (let index = 0; index < steep; index++) {
+            const filter = audio_context.createBiquadFilter();
+            filter.type = "highpass";
+            this._high_pass.push(filter);
+            if (prev) {
+                prev.connect(filter);
+            }
+            prev = filter;
+        }
+        prev?.connect(this._gain_node);
+    }
+    get exit_node() {
+        return this._gain_node;
+    }
+    get enter_node() {
+        return this._low_pass[0];
+    }
+    automate_frequency(frequencies, start, duration) {
+        const low_array = [];
+        const high_array = [];
+        for (let index = 0; index < frequencies.length; index++) {
+            low_array.push(frequencies[index].low);
+            high_array.push(frequencies[index].high);
+        }
+        this._low_pass.forEach((filter) => {
+            filter.frequency.setValueCurveAtTime(low_array, start, duration);
+        });
+        this._high_pass.forEach((filter) => {
+            filter.frequency.setValueCurveAtTime(high_array, start, duration);
+        });
+    }
+    automate_gain(amplitude, activated, start, duration) {
+        const gain_array = [];
+        for (let index = 0; index < activated.length; index++) {
+            gain_array.push(activated[index] ? amplitude : 0);
+        }
+        this._gain_node.gain.setValueCurveAtTime(gain_array, start, duration);
+    }
+}
 const anchors = [];
 let audio_context = new AudioContext();
-let oscilators = [];
+let filters = [];
 let rendering = false;
 function set_stroke_style(ctx) {
     ctx.strokeStyle = settings.stroke;
@@ -190,21 +245,16 @@ function generate_noise(audio_context, duration) {
         time_domain[sample_index] = Math.random() * 2 - 1;
     }
     const buffer_source = audio_context.createBufferSource();
-    buffer_source.loop = true;
     buffer_source.buffer = buffer;
     return buffer_source;
 }
-function init_oscilators(audio_context) {
+function init_filters(audio_context) {
     audio_context.suspend();
-    oscilators = [];
+    filters = [];
     for (let i = 0; i < anchors.length; i++) {
-        const oscilator = audio_context.createOscillator();
-        const gain = audio_context.createGain();
-        gain.gain.setValueAtTime(0.75 / anchors.length, audio_context.currentTime);
-        oscilator.type = "sine";
-        oscilator.connect(gain);
-        gain.connect(audio_context.destination);
-        oscilators.push(oscilator);
+        const filter = new LHPassFilter(4, audio_context);
+        filter.exit_node.connect(audio_context.destination);
+        filters.push(filter);
     }
 }
 function get_caret_position(time_stamp) {
@@ -235,48 +285,71 @@ function find_intersection(position, anchor1, anchor2) {
         return undefined;
     }
 }
-function transcribe_user_shape(audio_context) {
+function transcribe_user_shape() {
     const frequencies = [];
-    const markers = [];
-    for (let index = 0; index < oscilators.length; index++) {
+    const activated = [];
+    for (let index = 0; index < filters.length; index++) {
         frequencies.push([]);
+        activated.push([]);
     }
-    for (let index = 0; index < anchors.length; index++) {
-        for (let time_stamp = 0; time_stamp <= settings.rate; time_stamp += 0.001) {
-            const caret_position = get_caret_position(time_stamp);
+    for (let time_stamp = 0; time_stamp <= settings.rate; time_stamp += 0.001) {
+        const intersections = [];
+        const caret_position = get_caret_position(time_stamp);
+        for (let index = 0; index < anchors.length; index++) {
             const anchor1 = anchors[index];
             const anchor2 = anchors[(index + 1) % anchors.length];
-            const shifted_time = audio_context.currentTime + time_stamp;
             const intersection = find_intersection(caret_position, anchor1, anchor2);
-            if (intersection === undefined) {
-                if (frequencies[index].length != 0) {
-                    markers[index].end = shifted_time;
-                    break;
-                }
+            if (intersection) {
+                intersections.push(intersection);
+            }
+        }
+        intersections.sort((a, b) => {
+            if (a.y < b.y) {
+                return -1;
+            }
+            else if (a.y > b.y) {
+                return 1;
             }
             else {
-                if (frequencies[index].length == 0) {
-                    markers[index] = { start: shifted_time, end: audio_context.currentTime + settings.rate };
+                return 0;
+            }
+        });
+        if (intersections.length % 2 != 0) {
+            for (let index = 0; index < filters.length; index++) {
+                frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
+                activated[index].push(false);
+            }
+        }
+        else {
+            for (let index = 0; index < filters.length; index++) {
+                if (index + 1 < intersections.length) {
+                    frequencies[index].push({
+                        low: normalize_linear(intersections[index].y),
+                        high: normalize_linear(intersections[index + 1].y)
+                    });
+                    activated[index].push(true);
                 }
-                frequencies[index].push(normalize_linear(intersection.y));
+                else {
+                    frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
+                    activated[index].push(false);
+                }
             }
         }
     }
-    return { frequencies: frequencies, markers: markers };
+    return { frequencies: frequencies, activated: activated };
 }
 function render() {
     if (rendering) {
         return;
     }
-    const noise = generate_noise(audio_context, 1);
+    const noise = generate_noise(audio_context, settings.rate);
     noise.start();
-    noise.connect(audio_context.destination);
-    init_oscilators(audio_context);
-    const transcribed = transcribe_user_shape(audio_context);
-    for (let index = 0; index < oscilators.length; index++) {
-        oscilators[index].frequency.setValueCurveAtTime(transcribed.frequencies[index], transcribed.markers[index].start, (transcribed.markers[index].end - transcribed.markers[index].start));
-        oscilators[index].start(transcribed.markers[index].start);
-        oscilators[index].stop(transcribed.markers[index].end);
+    init_filters(audio_context);
+    const transcribed = transcribe_user_shape();
+    for (let index = 0; index < filters.length; index++) {
+        filters[index].automate_frequency(transcribed.frequencies[index], audio_context.currentTime, settings.rate);
+        filters[index].automate_gain(0.75 / filters.length, transcribed.activated[index], audio_context.currentTime, settings.rate);
+        noise.connect(filters[index].enter_node);
     }
     audio_context.resume();
     rendering = true;

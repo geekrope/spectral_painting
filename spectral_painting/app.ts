@@ -92,57 +92,90 @@ class Point
 
 class LHPassFilter
 {
-	private _low_cutoff: number;
-	private _high_cutoff: number;
-	private _low_pass: BiquadFilterNode;
-	private _high_pass: BiquadFilterNode;
+	private _low_pass: BiquadFilterNode[];
+	private _high_pass: BiquadFilterNode[];
+	private _gain_node: GainNode;
 
-	public get low_cutoff()
-	{
-		return this._low_cutoff;
-	}
-	public get high_cutoff()
-	{
-		return this._high_cutoff;
-	}
 	public get exit_node(): AudioNode
 	{
-		return this._high_pass;
+		return this._gain_node;
 	}
 	public get enter_node(): AudioNode
 	{
-		return this._low_pass;
+		return this._low_pass[0];
 	}
 
-	public set low_cutoff(value: number)
+	public automate_frequency(frequencies: { low: number, high: number }[], start: number, duration: number)
 	{
-		this._low_cutoff = value;
-		this._low_pass.frequency.value = value;
+		const low_array: number[] = [];
+		const high_array: number[] = [];
+
+		for (let index = 0; index < frequencies.length; index++)
+		{
+			low_array.push(frequencies[index].low);
+			high_array.push(frequencies[index].high);
+		}
+
+		this._low_pass.forEach((filter) =>
+		{
+			filter.frequency.setValueCurveAtTime(low_array, start, duration);
+		});
+		this._high_pass.forEach((filter) =>
+		{
+			filter.frequency.setValueCurveAtTime(high_array, start, duration);
+		});
 	}
-	public set high_cutoff(value: number)
+	public automate_gain(amplitude: number, activated: boolean[], start: number, duration: number)
 	{
-		this._high_cutoff = value;
-		this._high_pass.frequency.value = value;
+		const gain_array = [];
+
+		for (let index = 0; index < activated.length; index++)
+		{
+			gain_array.push(activated[index] ? amplitude : 0);
+		}
+
+		this._gain_node.gain.setValueCurveAtTime(gain_array, start, duration);
 	}
 
-	public constructor(low_cutoff: number, high_cutoff: number, audio_context: AudioContext)
+	public constructor(steep: number, audio_context: AudioContext)
 	{
-		this._low_cutoff = low_cutoff;
-		this._high_cutoff = high_cutoff;
-		this._low_pass = audio_context.createBiquadFilter();
-		this._high_pass = audio_context.createBiquadFilter();
+		this._gain_node = audio_context.createGain();
+		this._gain_node.gain.value = 0;
+		this._low_pass = [];
+		this._high_pass = [];
 
-		this._low_pass.type = "lowpass";
-		this._high_pass.type = "highpass";
+		let prev: BiquadFilterNode | undefined = undefined;
+		for (let index = 0; index < steep; index++)
+		{
+			const filter = audio_context.createBiquadFilter();
+			filter.type = "lowpass";
+			this._low_pass.push(filter);
 
-		this._low_pass.connect(this._high_pass);
+			if (prev)
+			{
+				prev.connect(filter);
+			}
+			prev = filter;
+		}
+		for (let index = 0; index < steep; index++)
+		{
+			const filter = audio_context.createBiquadFilter();
+			filter.type = "highpass";
+			this._high_pass.push(filter);
+
+			if (prev)
+			{
+				prev.connect(filter);
+			}
+			prev = filter;
+		}
+		prev?.connect(this._gain_node);
 	}
 }
 
 const anchors: Point[] = [];
 let audio_context: AudioContext = new AudioContext();
 let filters: LHPassFilter[] = [];
-let gains: GainNode[] = [];
 let rendering = false;
 
 function set_stroke_style(ctx: CanvasRenderingContext2D)
@@ -329,17 +362,12 @@ function init_filters(audio_context: AudioContext)
 {
 	audio_context.suspend();
 	filters = [];
-	gains = [];
 
 	for (let i = 0; i < anchors.length; i++)
 	{
-		const filter = new LHPassFilter(settings.frequency_range.low, settings.frequency_range.high, audio_context);
-		const gain = audio_context.createGain();
+		const filter = new LHPassFilter(4, audio_context);
 
-		gain.gain.value = 0;
-
-		filter.exit_node.connect(gain);
-		gain.connect(audio_context.destination);
+		filter.exit_node.connect(audio_context.destination);
 		filters.push(filter);
 	}
 }
@@ -381,7 +409,101 @@ function find_intersection(position: number, anchor1: Point, anchor2: Point): Ca
 		return undefined;
 	}
 }
-function transcribe_user_shape(): { frequencies: { low: number, high: number }, markers: { start: number, end: number } }
+function transcribe_user_shape(): { frequencies: { low: number, high: number }[][], activated: boolean[][] }
+{
+	const frequencies: { low: number, high: number }[][] = [];
+	const activated: boolean[][] = [];
+
+	for (let index = 0; index < filters.length; index++)
+	{
+		frequencies.push([]);
+		activated.push([]);
+	}
+
+	for (let time_stamp = 0; time_stamp <= settings.rate; time_stamp += 0.001)
+	{
+		const intersections = [];
+		const caret_position = get_caret_position(time_stamp);
+
+		for (let index = 0; index < anchors.length; index++)
+		{
+			const anchor1 = anchors[index];
+			const anchor2 = anchors[(index + 1) % anchors.length];
+			const intersection = find_intersection(caret_position, anchor1, anchor2);
+
+			if (intersection)
+			{
+				intersections.push(intersection);
+			}
+		}
+
+		intersections.sort((a: CartesianPoint, b: CartesianPoint) =>
+		{
+			if (a.y < b.y) { return -1; }
+			else if (a.y > b.y) { return 1; }
+			else { return 0; }
+		});
+
+		if (intersections.length % 2 != 0)
+		{
+			for (let index = 0; index < filters.length; index++)
+			{
+				frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
+				activated[index].push(false);
+			}
+		}
+		else
+		{
+			for (let index = 0; index < filters.length; index++)
+			{
+				if (index + 1 < intersections.length)
+				{
+					frequencies[index].push({
+						low: normalize_linear(intersections[index].y),
+						high: normalize_linear(intersections[index + 1].y)
+					});
+					activated[index].push(true);
+				}
+				else
+				{
+					frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
+					activated[index].push(false);
+				}
+			}
+		}
+	}
+
+	return { frequencies: frequencies, activated: activated };
+}
+function render()
+{
+	if (rendering)
+	{
+		return;
+	}
+
+	const noise = generate_noise(audio_context, settings.rate);
+	noise.start();
+
+	init_filters(audio_context);
+
+	const transcribed = transcribe_user_shape();
+
+	for (let index = 0; index < filters.length; index++)
+	{
+		filters[index].automate_frequency(transcribed.frequencies[index], audio_context.currentTime, settings.rate);
+		filters[index].automate_gain(0.75 / filters.length, transcribed.activated[index], audio_context.currentTime, settings.rate);
+		noise.connect(filters[index].enter_node);
+	}
+
+	audio_context.resume();
+	rendering = true;
+	setTimeout(() =>
+	{
+		audio_context.suspend();
+		rendering = false;
+	}, settings.rate * 1000);
+}
 
 window.onload = () =>
 {
