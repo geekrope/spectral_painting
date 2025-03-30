@@ -90,9 +90,59 @@ class Point
 	}
 }
 
+class LHPassFilter
+{
+	private _low_cutoff: number;
+	private _high_cutoff: number;
+	private _low_pass: BiquadFilterNode;
+	private _high_pass: BiquadFilterNode;
+
+	public get low_cutoff()
+	{
+		return this._low_cutoff;
+	}
+	public get high_cutoff()
+	{
+		return this._high_cutoff;
+	}
+	public get exit_node(): AudioNode
+	{
+		return this._high_pass;
+	}
+	public get enter_node(): AudioNode
+	{
+		return this._low_pass;
+	}
+
+	public set low_cutoff(value: number)
+	{
+		this._low_cutoff = value;
+		this._low_pass.frequency.value = value;
+	}
+	public set high_cutoff(value: number)
+	{
+		this._high_cutoff = value;
+		this._high_pass.frequency.value = value;
+	}
+
+	public constructor(low_cutoff: number, high_cutoff: number, audio_context: AudioContext)
+	{
+		this._low_cutoff = low_cutoff;
+		this._high_cutoff = high_cutoff;
+		this._low_pass = audio_context.createBiquadFilter();
+		this._high_pass = audio_context.createBiquadFilter();
+
+		this._low_pass.type = "lowpass";
+		this._high_pass.type = "highpass";
+
+		this._low_pass.connect(this._high_pass);
+	}
+}
+
 const anchors: Point[] = [];
 let audio_context: AudioContext = new AudioContext();
-let oscilators: OscillatorNode[] = [];
+let filters: LHPassFilter[] = [];
+let gains: GainNode[] = [];
 let rendering = false;
 
 function set_stroke_style(ctx: CanvasRenderingContext2D)
@@ -271,27 +321,27 @@ function generate_noise(audio_context: AudioContext, duration: number): AudioBuf
 	}
 
 	const buffer_source = audio_context.createBufferSource();
-	buffer_source.loop = true;
 	buffer_source.buffer = buffer;
 
 	return buffer_source;
 }
-function init_oscilators(audio_context: AudioContext)
+function init_filters(audio_context: AudioContext)
 {
 	audio_context.suspend();
-	oscilators = [];
+	filters = [];
+	gains = [];
 
 	for (let i = 0; i < anchors.length; i++)
 	{
-		const oscilator = audio_context.createOscillator();
+		const filter = new LHPassFilter(settings.frequency_range.low, settings.frequency_range.high, audio_context);
 		const gain = audio_context.createGain();
 
-		gain.gain.setValueAtTime(0.75 / anchors.length, audio_context.currentTime);
-		oscilator.type = "sine";
-		oscilator.connect(gain);
+		gain.gain.value = 0;
+
+		filter.exit_node.connect(gain);
 		gain.connect(audio_context.destination);
-		oscilators.push(oscilator);
-	}	
+		filters.push(filter);
+	}
 }
 function get_caret_position(time_stamp: number): number
 {
@@ -331,80 +381,7 @@ function find_intersection(position: number, anchor1: Point, anchor2: Point): Ca
 		return undefined;
 	}
 }
-function transcribe_user_shape(audio_context: AudioContext): { frequencies: number[][], markers: { start: number, end: number }[] }
-{
-	const frequencies: number[][] = [];
-	const markers: { start: number, end: number }[] = [];
-
-	for (let index = 0; index < oscilators.length; index++)
-	{
-		frequencies.push([]);
-	}
-
-	for (let index = 0; index < anchors.length; index++)
-	{
-		for (let time_stamp = 0; time_stamp <= settings.rate; time_stamp += 0.001)
-		{
-			const caret_position = get_caret_position(time_stamp);
-			const anchor1 = anchors[index];
-			const anchor2 = anchors[(index + 1) % anchors.length];
-			const shifted_time = audio_context.currentTime + time_stamp;
-
-			const intersection = find_intersection(caret_position, anchor1, anchor2);
-
-			if (intersection === undefined)
-			{
-				if (frequencies[index].length != 0)
-				{
-					markers[index].end = shifted_time;
-					break;
-				}
-			}
-			else
-			{
-				if (frequencies[index].length == 0)
-				{
-					markers[index] = { start: shifted_time, end: audio_context.currentTime + settings.rate };
-				}
-				frequencies[index].push(normalize_linear(intersection.y));
-			}
-		}
-	}
-
-	return { frequencies: frequencies, markers: markers };
-}
-function render()
-{
-	if (rendering)
-	{
-		return;
-	}
-
-	const noise = generate_noise(audio_context, 1);
-	noise.start();
-	//noise.connect(audio_context.destination);
-
-	init_oscilators(audio_context);
-
-	const transcribed = transcribe_user_shape(audio_context);
-
-	for (let index = 0; index < oscilators.length; index++)
-	{
-		oscilators[index].frequency.setValueCurveAtTime(transcribed.frequencies[index],
-			transcribed.markers[index].start,
-			(transcribed.markers[index].end - transcribed.markers[index].start));
-		oscilators[index].start(transcribed.markers[index].start);
-		oscilators[index].stop(transcribed.markers[index].end);
-	}
-
-	audio_context.resume();
-	rendering = true;
-	setTimeout(() =>
-	{
-		audio_context.suspend();
-		rendering = false;
-	}, settings.rate * 1000);
-}
+function transcribe_user_shape(): { frequencies: { low: number, high: number }, markers: { start: number, end: number } }
 
 window.onload = () =>
 {
