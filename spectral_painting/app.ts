@@ -132,9 +132,17 @@ class Polygon
 			const intersection_y = (line.a * c - a * line.c) / (a * line.b - line.a * b);
 			const segment_angle = Math.atan2(-a, b);
 
-			if (intersection_x >= left_bound && intersection_x <= right_bound && isFinite(intersection_x) && isFinite(intersection_y))
+			if (intersection_x >= left_bound && intersection_x <= right_bound)
 			{
-				intersections.push({ point: { x: intersection_x, y: intersection_y }, x_axis_angle: segment_angle });
+				if (isFinite(intersection_x) && isFinite(intersection_y))
+				{
+					intersections.push({ point: { x: intersection_x, y: intersection_y }, x_axis_angle: segment_angle });
+
+				}
+				else
+				{
+					console.log("vertical line")
+				}
 			}
 		}
 		return intersections;
@@ -222,15 +230,15 @@ class LHPassFilter
 		return this._low_pass[0];
 	}
 
-	public automate_frequency(lower: number[], upper: number[], start: number, duration: number)
+	public automate_frequency(low_pass: number[], high_pass: number[], start: number, duration: number)
 	{
 		this._low_pass.forEach((filter) =>
 		{
-			filter.frequency.setValueCurveAtTime(lower, start, duration);
+			filter.frequency.setValueCurveAtTime(low_pass, start, duration);
 		});
 		this._high_pass.forEach((filter) =>
 		{
-			filter.frequency.setValueCurveAtTime(upper, start, duration);
+			filter.frequency.setValueCurveAtTime(high_pass, start, duration);
 		});
 	}
 	public automate_gain(amplitude: number, activated: boolean[], start: number, duration: number)
@@ -435,6 +443,7 @@ class UserInterface
 }
 class FillAudioProcessor implements AudioProcessor
 {
+	private _steep: number = 12;
 	private _filters: LHPassFilter[];
 	private _audio_context: AudioContext;
 	private _director: Director;
@@ -485,7 +494,7 @@ class FillAudioProcessor implements AudioProcessor
 
 		for (let index = 0; index < count; index++)
 		{
-			const filter = new LHPassFilter(6, this._audio_context);
+			const filter = new LHPassFilter(this._steep, this._audio_context);
 
 			filter.exit_node.connect(this._audio_context.destination);
 			this._filters.push(filter);
@@ -510,8 +519,8 @@ class FillAudioProcessor implements AudioProcessor
 
 			intersections.sort((a: CartesianPoint, b: CartesianPoint) =>
 			{
-				if (a.y < b.y) { return -1; }
-				else if (a.y > b.y) { return 1; }
+				if (a.y < b.y) { return 1; }
+				else if (a.y > b.y) { return -1; }
 				else { return 0; }
 			});
 
@@ -564,8 +573,8 @@ class FillAudioProcessor implements AudioProcessor
 
 		for (let index = 0; index < this._filters.length; index++)
 		{
-			this._filters[index].automate_frequency(transcribed.lower_frequencies[index], transcribed.upper_frequencies[index], this._audio_context.currentTime, this._director.settings.rate);
-			this._filters[index].automate_gain(0.75 / this._filters.length, transcribed.activated[index], this._audio_context.currentTime, this._director.settings.rate);
+			this._filters[index].automate_frequency(transcribed.upper_frequencies[index], transcribed.lower_frequencies[index], this._audio_context.currentTime, this._director.settings.rate);
+			this._filters[index].automate_gain(0.5 / this._filters.length / this._steep, transcribed.activated[index], this._audio_context.currentTime, this._director.settings.rate);
 			noise.connect(this._filters[index].enter_node);
 		}
 
