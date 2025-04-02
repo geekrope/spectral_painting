@@ -74,7 +74,8 @@ class Polygon {
         }
         return this._points.length;
     }
-    *find_intersections(line) {
+    find_weighted_intersections(line) {
+        const intersections = [];
         for (let index = 0; index < this._points.length; index++) {
             const point1 = this._points[index];
             const point2 = this._points[(index + 1) % this._points.length];
@@ -85,20 +86,45 @@ class Polygon {
             const right_bound = Math.max(point1.x, point2.x);
             const intersection_x = (line.b * c - b * line.c) / (line.a * b - a * line.b);
             const intersection_y = (line.a * c - a * line.c) / (a * line.b - line.a * b);
+            const segment_angle = Math.atan2(-a, b);
             if (intersection_x >= left_bound && intersection_x <= right_bound && isFinite(intersection_x) && isFinite(intersection_y)) {
-                yield { x: intersection_x, y: intersection_y };
+                intersections.push({ point: { x: intersection_x, y: intersection_y }, x_axis_angle: segment_angle });
             }
         }
+        return intersections;
     }
-    is_inside(point) {
-        const intersections = Array.from(this.find_intersections({ a: 1, b: 0, c: -point.x }));
-        let count = 0;
-        for (let index = 0; index < intersections.length; index++) {
-            if (intersections[index].y < point.y) {
-                count++;
-            }
+    find_intersections(line) {
+        const intersections = this.find_weighted_intersections(line);
+        const projection = Array(intersections.length);
+        intersections.forEach((intersection, index) => {
+            projection[index] = intersection.point;
+        });
+        return projection;
+    }
+    is_inside(point, rule) {
+        switch (rule) {
+            case "evenodd":
+                const intersections = this.find_intersections({ a: 1, b: 0, c: -point.x });
+                let count = 0;
+                for (let index = 0; index < intersections.length; index++) {
+                    if (intersections[index].y < point.y) {
+                        count++;
+                    }
+                }
+                return count % 2 != 0;
+            case "nonzero":
+                const weighted_intersections = this.find_weighted_intersections({ a: 0, b: 1, c: -point.y });
+                let winding_number = 0;
+                for (let index = 0; index < weighted_intersections.length; index++) {
+                    const intersection = weighted_intersections[index];
+                    if (intersection.point.x >= point.x) {
+                        winding_number += intersection.x_axis_angle > 0 ? 1 : -1;
+                    }
+                }
+                return winding_number != 0;
+            default:
+                throw new Error("Not implemented");
         }
-        return count % 2 != 0;
     }
     insert(point) {
         this._points.splice(this.find_insert_index(point), 0, point);
@@ -217,7 +243,7 @@ class GraphicalInterface {
         this._ctx.stroke();
         if (fill) {
             this.set_shape_fill_style();
-            this._ctx.fill("evenodd");
+            this._ctx.fill("nonzero");
         }
     }
     draw_render_progress() {
@@ -320,7 +346,7 @@ class FillAudioProcessor {
         }
         for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.001) {
             const caret_position = this._director.get_caret_position(time_stamp);
-            let intersections = Array.from(shape.find_intersections({ a: 1, b: 0, c: -caret_position }));
+            let intersections = shape.find_intersections({ a: 1, b: 0, c: -caret_position });
             intersections.sort((a, b) => {
                 if (a.y < b.y) {
                     return -1;
@@ -342,7 +368,7 @@ class FillAudioProcessor {
                 const upper_point = this._director.normalize_linear(intersections[index + 1].y);
                 const lower_point = this._director.normalize_linear(intersections[index].y);
                 const mid_point = Point.from_cartesian((intersections[index].x + intersections[index + 1].x) / 2, (intersections[index].y + intersections[index + 1].y) / 2, this._director.settings.origin.x, this._director.settings.origin.y);
-                if (shape.is_inside(mid_point)) {
+                if (shape.is_inside(mid_point, "nonzero")) {
                     lower_frequencies[filter_index].push(lower_point);
                     upper_frequencies[filter_index].push(upper_point);
                     activated[filter_index].push(true);
