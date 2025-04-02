@@ -1,19 +1,5 @@
-﻿const settings = {
-	frequency_range: { low: 65, high: 20000 },
-	rate: 5,
-	box: { x: 100, y: 100, width: 500, height: 500 },
-	origin: { x: 350, y: 350 },
-	anchor_size: 5,
-	origin_size: 5,
-	fill: "white",
-	stroke: "#0349fc",
-	stroke_thickness: 1
-}
-
-type CartesianPoint = { x: number, y: number };
-
-let cnvs: HTMLCanvasElement | undefined = undefined;
-let ctx: CanvasRenderingContext2D | undefined = undefined;
+﻿type CartesianPoint = { x: number, y: number };
+type AudioProcessorType = "fill" | "outline";
 
 function dist(point1: CartesianPoint, point2: CartesianPoint)
 {
@@ -27,17 +13,26 @@ function angle(point1: CartesianPoint, point2: CartesianPoint, origin: Cartesian
 	return Math.acos((vector1.x * vector2.x + vector1.y * vector2.y) / dist(point1, origin) / dist(point2, origin));
 }
 
-function resize(this: HTMLCanvasElement)
+interface AudioProcessor
 {
-	const cnvs = this as HTMLCanvasElement;
-	cnvs.width = window.innerWidth;
-	cnvs.height = window.innerHeight;
-
-	const padding = 50;
-	settings.box = { x: padding, y: padding, width: cnvs.width - 2 * padding, height: cnvs.height - 2 * padding };
-	settings.origin = { x: cnvs.width / 2, y: cnvs.height / 2 };
+	get current_time(): number;
+	get rendering(): boolean;
+	render(shape: Polygon): void;
 }
 
+class Settings
+{
+	public frequency_range: { low: number, high: number } = { low: 65, high: 20000 };
+	public rate: number = 5;
+	public box: { x: number, y: number, width: number, height: number } = { x: 100, y: 100, width: 500, height: 500 };
+	public origin: { x: number, y: number } = { x: 350, y: 350 };
+	public anchor_size: number = 5;
+	public origin_size: number = 5;
+	public fill: string = "white";
+	public shape_fill: string = "#ececec";
+	public stroke: string = "#0349fc";
+	public stroke_thickness: number = 1;
+}
 class Point
 {
 	private _angle: number;
@@ -89,7 +84,92 @@ class Point
 		this._origin_y = origin_y;
 	}
 }
+class Polygon
+{
+	private _points: Point[];
 
+	public get points(): ReadonlyArray<Point>
+	{
+		return this._points;
+	}
+
+	private check_bounds(index: number)
+	{
+		if (index < 0 || index >= this._points.length)
+		{
+			throw new Error("Index out of bounds");
+		}
+	}
+	private find_insert_index(point: Point)
+	{
+		for (let index = 0; index < this._points.length; index++)
+		{
+			if (point.angle < this._points[index].angle)
+			{
+				return index;
+			}
+		}
+
+		return this._points.length;
+	}
+
+	public *find_intersections(line: { a: number, b: number, c: number })
+	{
+		for (let index = 0; index < this._points.length; index++)
+		{
+			const point1 = this._points[index];
+			const point2 = this._points[(index + 1) % this._points.length];
+
+			const a = (-point1.y + point2.y);
+			const b = (point1.x - point2.x);
+			const c = -a * point1.x - b * point1.y;
+
+			const left_bound = Math.min(point1.x, point2.x);
+			const right_bound = Math.max(point1.x, point2.x);
+			const intersection_x = (line.b * c - b * line.c) / (line.a * b - a * line.b);
+			const intersection_y = (line.a * c - a * line.c) / (a * line.b - line.a * b);
+
+			if (intersection_x >= left_bound && intersection_x <= right_bound && isFinite(intersection_x) && isFinite(intersection_y))
+			{
+				yield { x: intersection_x, y: intersection_y };
+			}
+		}
+	}
+	public is_inside(point: Point)
+	{
+		const intersections = Array.from(this.find_intersections({ a: 1, b: 0, c: -point.x }));
+		let count = 0;
+
+		for (let index = 0; index < intersections.length; index++)
+		{
+			if (intersections[index].y < point.y)
+			{
+				count++;
+			}
+		}
+
+		return count % 2 != 0;
+	}
+	public insert(point: Point)
+	{
+		this._points.splice(this.find_insert_index(point), 0, point);
+	}
+	public delete(index: number)
+	{
+		this.check_bounds(index);
+		this._points.splice(index, 1);
+	}
+	public replace(index: number, value: Point)
+	{
+		this.check_bounds(index);
+		this._points[index] = value;
+	}
+
+	public constructor()
+	{
+		this._points = [];
+	}
+}
 class LHPassFilter
 {
 	private _low_pass: BiquadFilterNode[];
@@ -105,24 +185,15 @@ class LHPassFilter
 		return this._low_pass[0];
 	}
 
-	public automate_frequency(frequencies: { low: number, high: number }[], start: number, duration: number)
+	public automate_frequency(lower: number[], upper: number[], start: number, duration: number)
 	{
-		const low_array: number[] = [];
-		const high_array: number[] = [];
-
-		for (let index = 0; index < frequencies.length; index++)
-		{
-			low_array.push(frequencies[index].low);
-			high_array.push(frequencies[index].high);
-		}
-
 		this._low_pass.forEach((filter) =>
 		{
-			filter.frequency.setValueCurveAtTime(low_array, start, duration);
+			filter.frequency.setValueCurveAtTime(lower, start, duration);
 		});
 		this._high_pass.forEach((filter) =>
 		{
-			filter.frequency.setValueCurveAtTime(high_array, start, duration);
+			filter.frequency.setValueCurveAtTime(upper, start, duration);
 		});
 	}
 	public automate_gain(amplitude: number, activated: boolean[], start: number, duration: number)
@@ -172,360 +243,490 @@ class LHPassFilter
 		prev?.connect(this._gain_node);
 	}
 }
+class GraphicalInterface
+{
+	private _ctx: CanvasRenderingContext2D;
+	private _director: Director;
 
-const anchors: Point[] = [];
-let audio_context: AudioContext = new AudioContext();
-let filters: LHPassFilter[] = [];
-let rendering = false;
-
-function set_stroke_style(ctx: CanvasRenderingContext2D)
-{
-	ctx.strokeStyle = settings.stroke;
-	ctx.lineWidth = settings.stroke_thickness;
-}
-function set_fill_style(ctx: CanvasRenderingContext2D)
-{
-	ctx.fillStyle = settings.fill;
-}
-function draw_box(ctx: CanvasRenderingContext2D)
-{
-	ctx.strokeRect(settings.box.x, settings.box.y, settings.box.width, settings.box.height)
-}
-function draw_origin(ctx: CanvasRenderingContext2D)
-{
-	set_stroke_style(ctx);
-	ctx.beginPath();
-	ctx.moveTo(settings.origin.x - settings.origin_size, settings.origin.y);
-	ctx.lineTo(settings.origin.x + settings.origin_size, settings.origin.y);
-	ctx.moveTo(settings.origin.x, settings.origin.y - settings.origin_size);
-	ctx.lineTo(settings.origin.x, settings.origin.y + settings.origin_size);
-	ctx.stroke();
-	ctx.closePath();
-}
-function draw_anchors(ctx: CanvasRenderingContext2D)
-{
-	set_stroke_style(ctx);
-	set_fill_style(ctx);
-
-	anchors.forEach((anchor: { x: number, y: number }) =>
+	private set_stroke_style()
 	{
-		ctx.beginPath();
-		ctx.arc(anchor.x, anchor.y, settings.anchor_size, 0, Math.PI * 2);
-		ctx.fill();
-		ctx.stroke();
-		ctx.closePath();
-	})
-}
-function draw_connections(ctx: CanvasRenderingContext2D)
-{
-	set_stroke_style(ctx);
-
-	for (let index = 0; index < anchors.length; index++)
-	{
-		const adjacent_index = (index + 1) % anchors.length;
-		ctx.beginPath();
-		ctx.moveTo(anchors[index].x, anchors[index].y);
-		ctx.lineTo(anchors[adjacent_index].x, anchors[adjacent_index].y);
-		ctx.stroke();
-		ctx.closePath();
+		this._ctx.strokeStyle = this._director.settings.stroke;
+		this._ctx.lineWidth = this._director.settings.stroke_thickness;
 	}
-}
-function draw_render_progress(time: number, ctx: CanvasRenderingContext2D)
-{
-	set_stroke_style(ctx);
-
-	const caret_position = time / settings.rate * settings.box.width + settings.box.x;
-
-	ctx.save();
-	ctx.shadowColor = settings.stroke;
-	ctx.shadowBlur = 15;
-
-	ctx.beginPath();
-	ctx.moveTo(caret_position, settings.box.y);
-	ctx.lineTo(caret_position, settings.box.y + settings.box.height);
-	ctx.stroke();
-	ctx.closePath();
-
-	ctx.restore();
-}
-function update(this: CanvasRenderingContext2D, audio_context: AudioContext)
-{
-	const ctx = this as CanvasRenderingContext2D;
-	ctx.clearRect(0, 0, ctx.canvas.clientWidth, ctx.canvas.clientHeight);
-	draw_box(ctx);
-	draw_origin(ctx);
-	draw_connections(ctx);
-	draw_anchors(ctx);
-
-	if (rendering)
+	private set_fill_style()
 	{
-		draw_render_progress(audio_context.currentTime, ctx);
+		this._ctx.fillStyle = this._director.settings.fill;
+	}
+	private set_shape_fill_style()
+	{
+		this._ctx.fillStyle = this._director.settings.shape_fill;
 	}
 
-	requestAnimationFrame(update.bind(ctx, audio_context));
-}
-
-let selected_anchor = -1;
-
-function find_insert_index(position: Point): number
-{
-	for (let index = 0; index < anchors.length; index++)
+	public clear()
 	{
-		if (position.angle < anchors[index].angle)
+		this._ctx.clearRect(0, 0, this._ctx.canvas.clientWidth, this._ctx.canvas.clientHeight);
+	}
+	public draw_box()
+	{
+		this._ctx.strokeRect(this._director.settings.box.x, this._director.settings.box.y, this._director.settings.box.width, this._director.settings.box.height)
+	}
+	public draw_origin()
+	{
+		this.set_stroke_style();
+		this._ctx.beginPath();
+		this._ctx.moveTo(this._director.settings.origin.x - this._director.settings.origin_size, this._director.settings.origin.y);
+		this._ctx.lineTo(this._director.settings.origin.x + this._director.settings.origin_size, this._director.settings.origin.y);
+		this._ctx.moveTo(this._director.settings.origin.x, this._director.settings.origin.y - this._director.settings.origin_size);
+		this._ctx.lineTo(this._director.settings.origin.x, this._director.settings.origin.y + this._director.settings.origin_size);
+		this._ctx.stroke();
+		this._ctx.closePath();
+	}
+	public draw_anchors()
+	{
+		this.set_stroke_style();
+		this.set_fill_style();
+
+		this._director.shape.points.forEach((anchor: { x: number, y: number }) =>
 		{
-			return index;
+			this._ctx.beginPath();
+			this._ctx.arc(anchor.x, anchor.y, this._director.settings.anchor_size, 0, Math.PI * 2);
+			this._ctx.fill();
+			this._ctx.stroke();
+			this._ctx.closePath();
+		})
+	}
+	public draw_connections(fill: boolean = false)
+	{
+		if (this._director.shape.points.length == 0)
+		{
+			return;
+		}
+
+		this.set_stroke_style();
+		this._ctx.beginPath();
+		this._ctx.moveTo(this._director.shape.points[0].x, this._director.shape.points[0].y);
+
+		for (let index = 1; index < this._director.shape.points.length; index++)
+		{
+			this._ctx.lineTo(this._director.shape.points[index].x, this._director.shape.points[index].y);
+		}
+
+		this._ctx.closePath();
+		this._ctx.stroke();
+		if (fill)
+		{
+			this.set_shape_fill_style();
+			this._ctx.fill("evenodd");
 		}
 	}
-
-	return anchors.length;
-}
-function limit_coords_within_box(position: Point): Point
-{
-	const x = Math.min(Math.max(position.x, settings.box.x), settings.box.x + settings.box.width);
-	const y = Math.min(Math.max(position.y, settings.box.y), settings.box.y + settings.box.height);
-
-	return Point.from_cartesian(x, y, position.origin_x, position.origin_y);
-}
-function mouse_down(args: MouseEvent)
-{
-	if (rendering)
+	public draw_render_progress()
 	{
-		return;
+		this.set_stroke_style();
+
+		const caret_position = this._director.get_caret_position();
+
+		this._ctx.save();
+		this._ctx.shadowColor = this._director.settings.stroke;
+		this._ctx.shadowBlur = 15;
+
+		this._ctx.beginPath();
+		this._ctx.moveTo(caret_position, this._director.settings.box.y);
+		this._ctx.lineTo(caret_position, this._director.settings.box.y + this._director.settings.box.height);
+		this._ctx.stroke();
+		this._ctx.closePath();
+
+		this._ctx.restore();
 	}
 
-	const mouse_position = { x: args.offsetX, y: args.offsetY };
-
-	for (let index = 0; index < anchors.length; index++)
+	public constructor(ctx: CanvasRenderingContext2D, director: Director)
 	{
-		if (dist(mouse_position, anchors[index]) <= settings.anchor_size + settings.stroke_thickness)
+		this._ctx = ctx;
+		this._director = director;
+	}
+}
+class UserInterface
+{
+	private _selected_anchor: number;
+	private _director: Director;
+
+	public limit_coords_within_box(position: Point): Point
+	{
+		const x = Math.min(Math.max(position.x, this._director.settings.box.x), this._director.settings.box.x + this._director.settings.box.width);
+		const y = Math.min(Math.max(position.y, this._director.settings.box.y), this._director.settings.box.y + this._director.settings.box.height);
+
+		return Point.from_cartesian(x, y, position.origin_x, position.origin_y);
+	}
+	public handle_mouse_down(args: MouseEvent)
+	{
+		const mouse_position = { x: args.offsetX, y: args.offsetY };
+		this._selected_anchor = this._director.get_selection(mouse_position);
+
+		if (args.button == 2 && this._selected_anchor != -1)
 		{
-			selected_anchor = index;
+			this._director.delete(this._selected_anchor);
+			this._selected_anchor = -1;
 		}
 	}
-
-	if (args.button == 2 && selected_anchor != -1)
+	public handle_mouse_move(args: MouseEvent)
 	{
-		anchors.splice(selected_anchor, 1);
-		selected_anchor = -1;
-	}
-}
-function mouse_move(args: MouseEvent)
-{
-	if (rendering)
-	{
-		return;
-	}
-
-	if (selected_anchor != -1)
-	{
-		const within_box = limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, settings.origin.x, settings.origin.y));
-
-		anchors[selected_anchor] = within_box;
-	}
-}
-function mouse_up(args: MouseEvent)
-{
-	if (rendering)
-	{
-		return;
-	}
-
-	if (selected_anchor == -1 && args.button == 0)
-	{
-		const position = limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, settings.origin.x, settings.origin.y));
-		const insert_index = find_insert_index(position);
-
-		anchors.splice(insert_index, 0, position);
-		return;
-	}
-
-	selected_anchor = -1;
-}
-
-function generate_noise(audio_context: AudioContext, duration: number): AudioBufferSourceNode
-{
-	const samples_number = audio_context.sampleRate * duration;
-	const buffer = audio_context.createBuffer(1, samples_number, audio_context.sampleRate);
-	const time_domain = buffer.getChannelData(0);
-
-	for (let sample_index = 0; sample_index < samples_number; sample_index++)
-	{
-		time_domain[sample_index] = Math.random() * 2 - 1;
-	}
-
-	const buffer_source = audio_context.createBufferSource();
-	buffer_source.buffer = buffer;
-
-	return buffer_source;
-}
-function init_filters(audio_context: AudioContext)
-{
-	audio_context.suspend();
-	filters = [];
-
-	for (let i = 0; i < anchors.length; i++)
-	{
-		const filter = new LHPassFilter(4, audio_context);
-
-		filter.exit_node.connect(audio_context.destination);
-		filters.push(filter);
-	}
-}
-function get_caret_position(time_stamp: number): number
-{
-	return (time_stamp / settings.rate) * settings.box.width + settings.box.x;
-}
-function normalize_linear(value: number): number
-{
-	const bias = Math.log(settings.frequency_range.low) / Math.log(settings.frequency_range.high);
-	const ratio = (value - settings.box.y) / settings.box.height;
-
-	return Math.pow(settings.frequency_range.high, (1 - ratio) * (1 - bias) + bias);
-}
-function normalize_exponential(value: number): number
-{
-	const bias = Math.log(settings.frequency_range.low) / Math.log(settings.frequency_range.high);
-	const power = Math.log(value) / Math.log(settings.frequency_range.high);
-	const ratio = -(power - bias) / (1 - bias) + 1;
-
-	return ratio * settings.box.height + settings.box.y;
-}
-function find_intersection(position: number, anchor1: Point, anchor2: Point): CartesianPoint | undefined
-{
-	const a = (-anchor1.y + anchor2.y);
-	const b = (anchor1.x - anchor2.x);
-	const c = -a * anchor1.x - b * anchor1.y;
-
-	const left_bound = Math.min(anchor1.x, anchor2.x);
-	const right_bound = Math.max(anchor1.x, anchor2.x);
-	const intersection_y = (-c - a * position) / b;
-
-	if (position >= left_bound && position <= right_bound && isFinite(intersection_y))
-	{
-		return { x: position, y: intersection_y };
-	}
-	else
-	{
-		return undefined;
-	}
-}
-function transcribe_user_shape(): { frequencies: { low: number, high: number }[][], activated: boolean[][] }
-{
-	const frequencies: { low: number, high: number }[][] = [];
-	const activated: boolean[][] = [];
-
-	for (let index = 0; index < filters.length; index++)
-	{
-		frequencies.push([]);
-		activated.push([]);
-	}
-
-	for (let time_stamp = 0; time_stamp <= settings.rate; time_stamp += 0.001)
-	{
-		const intersections = [];
-		const caret_position = get_caret_position(time_stamp);
-
-		for (let index = 0; index < anchors.length; index++)
+		if (this._selected_anchor != -1)
 		{
-			const anchor1 = anchors[index];
-			const anchor2 = anchors[(index + 1) % anchors.length];
-			const intersection = find_intersection(caret_position, anchor1, anchor2);
+			const within_box = this.limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
 
-			if (intersection)
+			this._director.replace(this._selected_anchor, within_box);
+		}
+	}
+	public handle_mouse_up(args: MouseEvent)
+	{
+		if (this._selected_anchor == -1 && args.button == 0)
+		{
+			const position = this.limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
+			this._director.insert(position);
+
+			return;
+		}
+
+		this._selected_anchor = -1;
+	}
+
+	public constructor(director: Director)
+	{
+		this._selected_anchor = -1;
+		this._director = director;
+	}
+}
+class FillAudioProcessor implements AudioProcessor
+{
+	private _filters: LHPassFilter[];
+	private _audio_context: AudioContext;
+	private _director: Director;
+	private _rendering: boolean;
+	private _rendering_start: number;
+
+	public get rendering(): boolean
+	{
+		return this._rendering;
+	}
+	public get current_time(): number
+	{
+		if (!this.rendering)
+		{
+			throw new Error("Unable to fetch current time unless render is running")
+		}
+
+		return this._audio_context.currentTime - this._rendering_start;
+	}
+
+	private detach()
+	{
+		this._filters.forEach((filter) =>
+		{
+			filter.exit_node.disconnect(this._audio_context.destination);
+		})
+	}
+	private generate_noise(duration: number): AudioBufferSourceNode
+	{
+		const samples_number = this._audio_context.sampleRate * duration;
+		const buffer = this._audio_context.createBuffer(1, samples_number, this._audio_context.sampleRate);
+		const time_domain = buffer.getChannelData(0);
+
+		for (let sample_index = 0; sample_index < samples_number; sample_index++)
+		{
+			time_domain[sample_index] = Math.random() * 2 - 1;
+		}
+
+		const buffer_source = this._audio_context.createBufferSource();
+		buffer_source.buffer = buffer;
+
+		return buffer_source;
+	}
+	private initialize_filters(count: number)
+	{
+		this.detach();
+		this._filters = [];
+
+		for (let index = 0; index < count; index++)
+		{
+			const filter = new LHPassFilter(6, this._audio_context);
+
+			filter.exit_node.connect(this._audio_context.destination);
+			this._filters.push(filter);
+		}
+	}
+	private transcribe_user_shape(shape: Polygon): { lower_frequencies: number[][], upper_frequencies: number[][], activated: boolean[][] }
+	{
+		const lower_frequencies: number[][] = [];
+		const upper_frequencies: number[][] = [];
+		const activated: boolean[][] = [];
+
+		for (let index = 0; index < this._filters.length; index++)
+		{
+			lower_frequencies.push([]);
+			upper_frequencies.push([]);
+			activated.push([]);
+		}
+		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.001)
+		{
+			const caret_position = this._director.get_caret_position(time_stamp);
+			let intersections = Array.from(shape.find_intersections({ a: 1, b: 0, c: -caret_position }));
+
+			intersections.sort((a: CartesianPoint, b: CartesianPoint) =>
 			{
-				intersections.push(intersection);
-			}
-		}
+				if (a.y < b.y) { return -1; }
+				else if (a.y > b.y) { return 1; }
+				else { return 0; }
+			});
 
-		intersections.sort((a: CartesianPoint, b: CartesianPoint) =>
-		{
-			if (a.y < b.y) { return -1; }
-			else if (a.y > b.y) { return 1; }
-			else { return 0; }
-		});
+			//?????
+			//if (intersections.length % 2 != 0)
+			//{
+			//	intersections = [];
+			//}
 
-		if (intersections.length % 2 != 0)
-		{
-			for (let index = 0; index < filters.length; index++)
+			let filter_index = 0;
+
+			for (let index = 0; index < intersections.length - 1; index++)
 			{
-				frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
-				activated[index].push(false);
-			}
-		}
-		else
-		{
-			for (let index = 0; index < filters.length; index++)
-			{
-				if (index + 1 < intersections.length)
+				const upper_point = this._director.normalize_linear(intersections[index + 1].y);
+				const lower_point = this._director.normalize_linear(intersections[index].y);
+				const mid_point = Point.from_cartesian(
+					(intersections[index].x + intersections[index + 1].x) / 2,
+					(intersections[index].y + intersections[index + 1].y) / 2,
+					this._director.settings.origin.x,
+					this._director.settings.origin.y);
+
+				if (shape.is_inside(mid_point))
 				{
-					frequencies[index].push({
-						low: normalize_linear(intersections[index].y),
-						high: normalize_linear(intersections[index + 1].y)
-					});
-					activated[index].push(true);
-				}
-				else
-				{
-					frequencies[index].push({ low: settings.frequency_range.low, high: settings.frequency_range.high });
-					activated[index].push(false);
+					lower_frequencies[filter_index].push(lower_point);
+					upper_frequencies[filter_index].push(upper_point);
+					activated[filter_index].push(true);
+					filter_index++;
 				}
 			}
+
+			while (filter_index < this._filters.length)
+			{
+				lower_frequencies[filter_index].push(this._director.settings.frequency_range.low);
+				upper_frequencies[filter_index].push(this._director.settings.frequency_range.high);
+				activated[filter_index].push(false);
+				filter_index++;
+			}
 		}
+
+		return { lower_frequencies: lower_frequencies, upper_frequencies: upper_frequencies, activated: activated };
 	}
 
-	return { frequencies: frequencies, activated: activated };
+	public render()
+	{
+		const shape = this._director.shape;
+		this.initialize_filters(shape.points.length);
+
+		const transcribed = this.transcribe_user_shape(shape);
+		const noise = this.generate_noise(this._director.settings.rate);
+
+		for (let index = 0; index < this._filters.length; index++)
+		{
+			this._filters[index].automate_frequency(transcribed.lower_frequencies[index], transcribed.upper_frequencies[index], this._audio_context.currentTime, this._director.settings.rate);
+			this._filters[index].automate_gain(0.75 / this._filters.length, transcribed.activated[index], this._audio_context.currentTime, this._director.settings.rate);
+			noise.connect(this._filters[index].enter_node);
+		}
+
+		noise.start();
+
+		this._rendering = true;
+		this._rendering_start = this._audio_context.currentTime;
+
+		setTimeout((() =>
+		{
+			this._rendering = false;
+		}).bind(this), this._director.settings.rate * 1000);
+	}
+
+	public constructor(director: Director)
+	{
+		this._filters = [];
+		this._audio_context = new AudioContext();
+		this._director = director;
+		this._rendering = false;
+		this._rendering_start = -1;
+	}
 }
-function render()
+class Director
 {
-	if (rendering)
+	private _settings: Settings;
+	private _shape: Polygon;
+	private _audio_processor: AudioProcessor;
+	private _gui_instance: GraphicalInterface;
+	private _ui_instance: UserInterface;
+	private _audio_processor_type: AudioProcessorType;
+
+	public get settings(): Settings
 	{
-		return;
+		return this._settings;
+	}
+	public get shape(): Polygon
+	{
+		return this._shape;
+	}
+	public get rendering(): boolean
+	{
+		return this._audio_processor.rendering;
 	}
 
-	const noise = generate_noise(audio_context, settings.rate);
-	noise.start();
-
-	init_filters(audio_context);
-
-	const transcribed = transcribe_user_shape();
-
-	for (let index = 0; index < filters.length; index++)
+	//auxiliary
+	public get_selection(mouse_position: { x: number, y: number }): number
 	{
-		filters[index].automate_frequency(transcribed.frequencies[index], audio_context.currentTime, settings.rate);
-		filters[index].automate_gain(0.75 / filters.length, transcribed.activated[index], audio_context.currentTime, settings.rate);
-		noise.connect(filters[index].enter_node);
+		let selected_anchor = -1;
+
+		for (let index = 0; index < this._shape.points.length; index++)
+		{
+			if (dist(mouse_position, this._shape.points[index]) <= this._settings.anchor_size + this._settings.stroke_thickness)
+			{
+				selected_anchor = index;
+			}
+		}
+
+		return selected_anchor;
+	}
+	public get_caret_position(): number
+	public get_caret_position(time: number): number
+	public get_caret_position(time?: number): number
+	{
+		if (time === undefined)
+		{
+			return (this._audio_processor.current_time / this._settings.rate) * this._settings.box.width + this._settings.box.x;
+		}
+		return (time / this._settings.rate) * this._settings.box.width + this._settings.box.x;
+	}
+	public normalize_linear(value: number): number
+	{
+		const bias = Math.log(this._settings.frequency_range.low) / Math.log(this._settings.frequency_range.high);
+		const ratio = (value - this._settings.box.y) / this._settings.box.height;
+
+		return Math.pow(this._settings.frequency_range.high, (1 - ratio) * (1 - bias) + bias);
+	}
+	public normalize_exponential(value: number): number
+	{
+		const bias = Math.log(this._settings.frequency_range.low) / Math.log(this._settings.frequency_range.high);
+		const power = Math.log(value) / Math.log(this._settings.frequency_range.high);
+		const ratio = -(power - bias) / (1 - bias) + 1;
+
+		return ratio * this._settings.box.height + this._settings.box.y;
+	}
+	//shape actions
+	public delete(index: number)
+	{
+		this._shape.delete(index);
+	}
+	public replace(index: number, point: Point)
+	{
+		this._shape.replace(index, point);
+	}
+	public insert(point: Point)
+	{
+		this._shape.insert(point);
+	}
+	//mouse events
+	public mouse_down_handler(args: MouseEvent)
+	{
+		if (this.rendering)
+		{
+			return;
+		}
+		this._ui_instance.handle_mouse_down(args);
+	}
+	public mouse_move_handler(args: MouseEvent)
+	{
+		if (this.rendering)
+		{
+			return;
+		}
+		this._ui_instance.handle_mouse_move(args);
+	}
+	public mouse_up_handler(args: MouseEvent)
+	{
+		if (this.rendering)
+		{
+			return;
+		}
+		this._ui_instance.handle_mouse_up(args);
+	}
+	//general
+	public update()
+	{
+		this._gui_instance.clear();
+		this._gui_instance.draw_box();
+		this._gui_instance.draw_origin();
+		this._gui_instance.draw_connections(this._audio_processor_type == "fill");
+		this._gui_instance.draw_anchors();
+
+		if (this.rendering)
+		{
+			this._gui_instance.draw_render_progress();
+		}
+
+		requestAnimationFrame(this.update.bind(this));
+	}
+	public render()
+	{
+		if (this.rendering)
+		{
+			return;
+		}
+		this._audio_processor.render(this.shape);
 	}
 
-	audio_context.resume();
-	rendering = true;
-	setTimeout(() =>
+	public constructor(settings: Settings, drawing_context: CanvasRenderingContext2D, audio_processor_type: AudioProcessorType)
 	{
-		audio_context.suspend();
-		rendering = false;
-	}, settings.rate * 1000);
+		this._settings = settings;
+		this._shape = new Polygon();
+		this._audio_processor_type = audio_processor_type;
+		this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new FillAudioProcessor(this);
+		this._gui_instance = new GraphicalInterface(drawing_context, this);
+		this._ui_instance = new UserInterface(this);
+	}
+}
+
+function resize(this: HTMLCanvasElement, settings: Settings)
+{
+	const cnvs = this as HTMLCanvasElement;
+	cnvs.width = window.innerWidth;
+	cnvs.height = window.innerHeight;
+
+	const padding = 50;
+	settings.box = { x: padding, y: padding, width: cnvs.width - 2 * padding, height: cnvs.height - 2 * padding };
+	settings.origin = { x: cnvs.width / 2, y: cnvs.height / 2 };
 }
 
 window.onload = () =>
 {
-	cnvs = document.getElementById("cnvs") as HTMLCanvasElement;
-	if (!cnvs)
-	{
-		throw new Error("Failed to locate canvas element");
-	}
+	const canvas = document.getElementById("cnvs") as HTMLCanvasElement;
+	const drawing_context = canvas?.getContext("2d");
+	const render_button = document.getElementById("renderbtn");
 
-	const context = cnvs.getContext("2d");
-	if (!context)
+	if (!drawing_context)
 	{
 		throw new Error("Failed to get canvas drawing context");
 	}
-	ctx = context;
+	if (!render_button)
+	{
+		throw new Error("Failed to locate render button");
+	}
 
-	cnvs.onmousedown = mouse_down;
-	cnvs.onmousemove = mouse_move;
-	cnvs.onmouseup = mouse_up;
+	const settings = new Settings();
+	const director = new Director(settings, drawing_context, "fill");
 
-	resize.call(cnvs);
-	update.call(ctx, audio_context);
+	canvas.onmousedown = director.mouse_down_handler.bind(director);
+	canvas.onmousemove = director.mouse_move_handler.bind(director);
+	canvas.onmouseup = director.mouse_up_handler.bind(director);
 
-	window.onresize = resize.bind(cnvs);
+	resize.call(canvas, settings);
+	director.update();
+
+	render_button.onclick = () =>
+	{
+		director.render.call(director);
+	};
+
+	window.onresize = resize.bind(canvas, settings);
 }
