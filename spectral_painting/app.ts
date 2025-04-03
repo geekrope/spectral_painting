@@ -100,6 +100,14 @@ class Polygon
 			throw new Error("Index out of bounds");
 		}
 	}
+	private line_equation(point1: Point, point2: Point): { a: number, b: number, c: number }
+	{
+		const a = (-point1.y + point2.y);
+		const b = (point1.x - point2.x);
+		const c = -a * point1.x - b * point1.y;
+
+		return { a: a, b: b, c: c };
+	}
 	private find_insert_index(point: Point)
 	{
 		for (let index = 0; index < this._points.length; index++)
@@ -122,29 +130,20 @@ class Polygon
 			const point1 = this._points[index];
 			const point2 = this._points[(index + 1) % this._points.length];
 
-			const a = (-point1.y + point2.y);
-			const b = (point1.x - point2.x);
-			const c = -a * point1.x - b * point1.y;
+			const line_equation = this.line_equation(point1, point2);
 
 			const left_bound = Math.min(point1.x, point2.x);
 			const right_bound = Math.max(point1.x, point2.x);
-			const intersection_x = (line.b * c - b * line.c) / (line.a * b - a * line.b);
-			const intersection_y = (line.a * c - a * line.c) / (a * line.b - line.a * b);
-			const segment_angle = Math.atan2(-a, b);
+			const intersection_x = (line.b * line_equation.c - line_equation.b * line.c) / (line.a * line_equation.b - line_equation.a * line.b);
+			const intersection_y = (line.a * line_equation.c - line_equation.a * line.c) / (line_equation.a * line.b - line.a * line_equation.b);
+			const segment_angle = Math.atan2(-line_equation.a, line_equation.b);
 
-			if (intersection_x >= left_bound && intersection_x <= right_bound)
+			if (intersection_x >= left_bound && intersection_x <= right_bound && isFinite(intersection_x) && isFinite(intersection_y))
 			{
-				if (isFinite(intersection_x) && isFinite(intersection_y))
-				{
-					intersections.push({ point: { x: intersection_x, y: intersection_y }, x_axis_angle: segment_angle });
-
-				}
-				else
-				{
-					console.log("vertical line")
-				}
+				intersections.push({ point: { x: intersection_x, y: intersection_y }, x_axis_angle: segment_angle });
 			}
 		}
+
 		return intersections;
 	}
 	public find_intersections(line: { a: number, b: number, c: number }): CartesianPoint[]
@@ -194,6 +193,26 @@ class Polygon
 				throw new Error("Not implemented");
 		}
 
+	}
+	public lies_on_side(point: Point)
+	{
+		const epsilon = 1e-6;
+		for (let index = 0; index < this._points.length; index++)
+		{
+			const point1 = this._points[index];
+			const point2 = this._points[(index + 1) % this._points.length];
+			const left_bound = Math.min(point1.x, point2.x);
+			const right_bound = Math.max(point1.x, point2.x);
+
+			const line_equation = this.line_equation(point1, point2);
+
+			if (Math.abs(line_equation.a * point.x + line_equation.b * point.y + line_equation.c) < epsilon && point.x >= left_bound && point.x <= right_bound)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 	public insert(point: Point)
 	{
@@ -265,6 +284,8 @@ class LHPassFilter
 		{
 			const filter = audio_context.createBiquadFilter();
 			filter.type = "lowpass";
+			filter.Q.value = 0;
+
 			this._low_pass.push(filter);
 
 			if (prev)
@@ -277,6 +298,8 @@ class LHPassFilter
 		{
 			const filter = audio_context.createBiquadFilter();
 			filter.type = "highpass";
+			filter.Q.value = 0;
+
 			this._high_pass.push(filter);
 
 			if (prev)
@@ -500,6 +523,23 @@ class FillAudioProcessor implements AudioProcessor
 			this._filters.push(filter);
 		}
 	}
+	private fill_gaps(array: number[][], last_non_zero: number)
+	{
+		for (let index1 = 0; index1 < array.length; index1++)
+		{
+			for (let index2 = array[index1].length - 1; index2 >= 0; index2--)
+			{
+				if (array[index1][index2] != -1)
+				{
+					last_non_zero = array[index1][index2];
+				}
+				else
+				{
+					array[index1][index2] = last_non_zero;
+				}
+			}
+		}
+	}
 	private transcribe_user_shape(shape: Polygon): { lower_frequencies: number[][], upper_frequencies: number[][], activated: boolean[][] }
 	{
 		const lower_frequencies: number[][] = [];
@@ -512,7 +552,11 @@ class FillAudioProcessor implements AudioProcessor
 			upper_frequencies.push([]);
 			activated.push([]);
 		}
-		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.001)
+
+		let last_nonzero_lower = 0;
+		let last_nonzero_upper = 0;
+
+		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.02)
 		{
 			const caret_position = this._director.get_caret_position(time_stamp);
 			let intersections = shape.find_intersections({ a: 1, b: 0, c: -caret_position });
@@ -544,21 +588,30 @@ class FillAudioProcessor implements AudioProcessor
 
 				if (shape.is_inside(mid_point, "nonzero"))
 				{
+					last_nonzero_lower = lower_point;
+					last_nonzero_upper = lower_point;
+
 					lower_frequencies[filter_index].push(lower_point);
 					upper_frequencies[filter_index].push(upper_point);
 					activated[filter_index].push(true);
 					filter_index++;
 				}
+				else
+				{
+					console.log("out");
+				}
 			}
-
 			while (filter_index < this._filters.length)
 			{
-				lower_frequencies[filter_index].push(this._director.settings.frequency_range.low);
-				upper_frequencies[filter_index].push(this._director.settings.frequency_range.high);
+				lower_frequencies[filter_index].push(-1);
+				upper_frequencies[filter_index].push(-1);
 				activated[filter_index].push(false);
 				filter_index++;
 			}
 		}
+
+		this.fill_gaps(lower_frequencies, last_nonzero_lower);
+		this.fill_gaps(upper_frequencies, last_nonzero_upper);
 
 		return { lower_frequencies: lower_frequencies, upper_frequencies: upper_frequencies, activated: activated };
 	}
