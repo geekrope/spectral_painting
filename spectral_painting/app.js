@@ -18,6 +18,7 @@ class Settings {
         this.fill = "white";
         this.shape_fill = "#ececec";
         this.stroke = "#0349fc";
+        this.grid_stroke = "#ADD8E6";
         this.stroke_thickness = 1;
     }
 }
@@ -156,6 +157,42 @@ class Polygon {
         this._points[index] = value;
     }
 }
+class Grid {
+    constructor(partition, director) {
+        this._partition = partition;
+        this._director = director;
+    }
+    limit_coords_within_box(position) {
+        const x = Math.min(Math.max(position.x, this._director.settings.box.x), this._director.settings.box.x + this._director.settings.box.width);
+        const y = Math.min(Math.max(position.y, this._director.settings.box.y), this._director.settings.box.y + this._director.settings.box.height);
+        return Point.from_cartesian(x, y, position.origin_x, position.origin_y);
+    }
+    snap_to_grid(point) {
+        const box = this._director.settings.box;
+        const limited = this.limit_coords_within_box(point);
+        const size = this.size;
+        const x_factor = Math.round((limited.x - box.x) / size.horizontal);
+        const y_factor = Math.round((limited.y - box.y) / size.vertical);
+        return Point.from_cartesian(x_factor * size.horizontal + box.x, y_factor * size.vertical + box.y, point.origin_x, point.origin_y);
+    }
+    grid_lines() {
+        const x = [];
+        const y = [];
+        const size = this.size;
+        const box = this._director.settings.box;
+        for (let current_x = box.x; current_x < box.width + box.x; current_x += size.horizontal) {
+            x.push(current_x);
+        }
+        for (let current_y = box.y; current_y < box.height + box.y; current_y += size.vertical) {
+            y.push(current_y);
+        }
+        return { x: x, y: y };
+    }
+    get size() {
+        const box = this._director.settings.box;
+        return { horizontal: box.width / this._partition.horizontal, vertical: box.height / this._partition.vertical };
+    }
+}
 class LHPassFilter {
     constructor(steep, audio_context) {
         this._gain_node = audio_context.createGain();
@@ -212,31 +249,44 @@ class GraphicalInterface {
         this._ctx = ctx;
         this._director = director;
     }
-    set_stroke_style() {
-        this._ctx.strokeStyle = this._director.settings.stroke;
-        this._ctx.lineWidth = this._director.settings.stroke_thickness;
+    set_stroke_style(color) {
+        const settings = this._director.settings;
+        this._ctx.strokeStyle = color || settings.stroke;
+        this._ctx.lineWidth = settings.stroke_thickness;
     }
-    set_fill_style() {
-        this._ctx.fillStyle = this._director.settings.fill;
+    set_fill_style(color) {
+        this._ctx.fillStyle = color || this._director.settings.fill;
     }
-    set_shape_fill_style() {
-        this._ctx.fillStyle = this._director.settings.shape_fill;
+    draw_line(point1, point2) {
+        this._ctx.beginPath();
+        this._ctx.moveTo(point1.x, point1.y);
+        this._ctx.lineTo(point2.x, point2.y);
+        this._ctx.stroke();
+        this._ctx.closePath();
     }
     clear() {
         this._ctx.clearRect(0, 0, this._ctx.canvas.clientWidth, this._ctx.canvas.clientHeight);
     }
     draw_box() {
-        this._ctx.strokeRect(this._director.settings.box.x, this._director.settings.box.y, this._director.settings.box.width, this._director.settings.box.height);
+        const box = this._director.settings.box;
+        this._ctx.strokeRect(box.x, box.y, box.width, box.height);
+    }
+    draw_grid_lines() {
+        const lines = this._director.grid_lines();
+        const box = this._director.settings.box;
+        this.set_stroke_style(this._director.settings.grid_stroke);
+        lines.x.forEach((x) => {
+            this.draw_line({ x: x, y: box.y }, { x: x, y: box.y + box.height });
+        });
+        lines.y.forEach((y) => {
+            this.draw_line({ x: box.x, y: y }, { x: box.x + box.width, y: y });
+        });
     }
     draw_origin() {
+        const settings = this._director.settings;
         this.set_stroke_style();
-        this._ctx.beginPath();
-        this._ctx.moveTo(this._director.settings.origin.x - this._director.settings.origin_size, this._director.settings.origin.y);
-        this._ctx.lineTo(this._director.settings.origin.x + this._director.settings.origin_size, this._director.settings.origin.y);
-        this._ctx.moveTo(this._director.settings.origin.x, this._director.settings.origin.y - this._director.settings.origin_size);
-        this._ctx.lineTo(this._director.settings.origin.x, this._director.settings.origin.y + this._director.settings.origin_size);
-        this._ctx.stroke();
-        this._ctx.closePath();
+        this.draw_line({ x: settings.origin.x - settings.origin_size, y: settings.origin.y }, { x: settings.origin.x + settings.origin_size, y: settings.origin.y });
+        this.draw_line({ x: settings.origin.x, y: settings.origin.y - settings.origin_size }, { x: settings.origin.x, y: settings.origin.y + settings.origin_size });
     }
     draw_anchors() {
         this.set_stroke_style();
@@ -253,30 +303,28 @@ class GraphicalInterface {
         if (this._director.shape.points.length == 0) {
             return;
         }
+        const shape = this._director.shape;
         this.set_stroke_style();
         this._ctx.beginPath();
-        this._ctx.moveTo(this._director.shape.points[0].x, this._director.shape.points[0].y);
-        for (let index = 1; index < this._director.shape.points.length; index++) {
-            this._ctx.lineTo(this._director.shape.points[index].x, this._director.shape.points[index].y);
+        this._ctx.moveTo(shape.points[0].x, shape.points[0].y);
+        for (let index = 1; index < shape.points.length; index++) {
+            this._ctx.lineTo(shape.points[index].x, shape.points[index].y);
         }
         this._ctx.closePath();
         this._ctx.stroke();
         if (fill) {
-            this.set_shape_fill_style();
+            this.set_fill_style(this._director.settings.shape_fill);
             this._ctx.fill("nonzero");
         }
     }
     draw_render_progress() {
         this.set_stroke_style();
         const caret_position = this._director.get_caret_position();
+        const box = this._director.settings.box;
         this._ctx.save();
         this._ctx.shadowColor = this._director.settings.stroke;
         this._ctx.shadowBlur = 15;
-        this._ctx.beginPath();
-        this._ctx.moveTo(caret_position, this._director.settings.box.y);
-        this._ctx.lineTo(caret_position, this._director.settings.box.y + this._director.settings.box.height);
-        this._ctx.stroke();
-        this._ctx.closePath();
+        this.draw_line({ x: caret_position, y: box.y }, { x: caret_position, y: box.y + box.height });
         this._ctx.restore();
     }
 }
@@ -284,11 +332,6 @@ class UserInterface {
     constructor(director) {
         this._selected_anchor = -1;
         this._director = director;
-    }
-    limit_coords_within_box(position) {
-        const x = Math.min(Math.max(position.x, this._director.settings.box.x), this._director.settings.box.x + this._director.settings.box.width);
-        const y = Math.min(Math.max(position.y, this._director.settings.box.y), this._director.settings.box.y + this._director.settings.box.height);
-        return Point.from_cartesian(x, y, position.origin_x, position.origin_y);
     }
     handle_mouse_down(args) {
         const mouse_position = { x: args.offsetX, y: args.offsetY };
@@ -300,13 +343,13 @@ class UserInterface {
     }
     handle_mouse_move(args) {
         if (this._selected_anchor != -1) {
-            const within_box = this.limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
+            const within_box = this._director.snap_to_grid(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
             this._director.replace(this._selected_anchor, within_box);
         }
     }
     handle_mouse_up(args) {
         if (this._selected_anchor == -1 && args.button == 0) {
-            const position = this.limit_coords_within_box(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
+            const position = this._director.snap_to_grid(Point.from_cartesian(args.offsetX, args.offsetY, this._director.settings.origin.x, this._director.settings.origin.y));
             this._director.insert(position);
             return;
         }
@@ -347,9 +390,7 @@ class FillAudioProcessor {
         buffer_source.buffer = buffer;
         return buffer_source;
     }
-    initialize_filters(count) {
-        this.detach();
-        this._filters = [];
+    add_filters(count) {
         for (let index = 0; index < count; index++) {
             const filter = new LHPassFilter(this._steep, this._audio_context);
             filter.exit_node.connect(this._audio_context.destination);
@@ -360,10 +401,10 @@ class FillAudioProcessor {
         for (let index1 = 0; index1 < array.length; index1++) {
             for (let index2 = array[index1].length - 1; index2 >= 0; index2--) {
                 if (array[index1][index2] != -1) {
-                    last_non_zero = array[index1][index2];
+                    last_non_zero[index1] = array[index1][index2];
                 }
                 else {
-                    array[index1][index2] = last_non_zero;
+                    array[index1][index2] = last_non_zero[index1];
                 }
             }
         }
@@ -372,13 +413,9 @@ class FillAudioProcessor {
         const lower_frequencies = [];
         const upper_frequencies = [];
         const activated = [];
-        for (let index = 0; index < this._filters.length; index++) {
-            lower_frequencies.push([]);
-            upper_frequencies.push([]);
-            activated.push([]);
-        }
-        let last_nonzero_lower = 0;
-        let last_nonzero_upper = 0;
+        let last_nonzero_lower = [];
+        let last_nonzero_upper = [];
+        let counter = 0;
         for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.02) {
             const caret_position = this._director.get_caret_position(time_stamp);
             let intersections = shape.find_intersections({ a: 1, b: 0, c: -caret_position });
@@ -393,26 +430,34 @@ class FillAudioProcessor {
                     return 0;
                 }
             });
-            //?????
-            //if (intersections.length % 2 != 0)
-            //{
-            //	intersections = [];
-            //}
             let filter_index = 0;
             for (let index = 0; index < intersections.length - 1; index++) {
                 const upper_point = this._director.normalize_linear(intersections[index + 1].y);
                 const lower_point = this._director.normalize_linear(intersections[index].y);
                 const mid_point = Point.from_cartesian((intersections[index].x + intersections[index + 1].x) / 2, (intersections[index].y + intersections[index + 1].y) / 2, this._director.settings.origin.x, this._director.settings.origin.y);
                 if (shape.is_inside(mid_point, "nonzero")) {
-                    last_nonzero_lower = lower_point;
-                    last_nonzero_upper = lower_point;
+                    //filters count compensation
+                    if (filter_index >= this._filters.length) {
+                        const compensation = filter_index - this._filters.length + 1;
+                        const frequency_array_placeholder = new Array(counter);
+                        const gain_array_placeholder = new Array(counter);
+                        frequency_array_placeholder.fill(-1, 0, counter);
+                        gain_array_placeholder.fill(false, 0, counter);
+                        for (let index = 0; index < compensation; index++) {
+                            lower_frequencies.push(Array.from(frequency_array_placeholder));
+                            upper_frequencies.push(Array.from(frequency_array_placeholder));
+                            activated.push(Array.from(gain_array_placeholder));
+                            last_nonzero_lower.push(0);
+                            last_nonzero_upper.push(0);
+                        }
+                        this.add_filters(compensation);
+                    }
+                    last_nonzero_lower[filter_index] = lower_point;
+                    last_nonzero_upper[filter_index] = upper_point;
                     lower_frequencies[filter_index].push(lower_point);
                     upper_frequencies[filter_index].push(upper_point);
                     activated[filter_index].push(true);
                     filter_index++;
-                }
-                else {
-                    console.log("out");
                 }
             }
             while (filter_index < this._filters.length) {
@@ -421,6 +466,7 @@ class FillAudioProcessor {
                 activated[filter_index].push(false);
                 filter_index++;
             }
+            counter++;
         }
         this.fill_gaps(lower_frequencies, last_nonzero_lower);
         this.fill_gaps(upper_frequencies, last_nonzero_upper);
@@ -428,7 +474,8 @@ class FillAudioProcessor {
     }
     render() {
         const shape = this._director.shape;
-        this.initialize_filters(shape.points.length);
+        this.detach();
+        this._filters = [];
         const transcribed = this.transcribe_user_shape(shape);
         const noise = this.generate_noise(this._director.settings.rate);
         for (let index = 0; index < this._filters.length; index++) {
@@ -445,9 +492,10 @@ class FillAudioProcessor {
     }
 }
 class Director {
-    constructor(settings, drawing_context, audio_processor_type) {
+    constructor(settings, partition, drawing_context, audio_processor_type) {
         this._settings = settings;
         this._shape = new Polygon();
+        this._grid = new Grid(partition, this);
         this._audio_processor_type = audio_processor_type;
         this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new FillAudioProcessor(this);
         this._gui_instance = new GraphicalInterface(drawing_context, this);
@@ -518,10 +566,18 @@ class Director {
         }
         this._ui_instance.handle_mouse_up(args);
     }
+    //grid actions
+    snap_to_grid(point) {
+        return this._grid.snap_to_grid(point);
+    }
+    grid_lines() {
+        return this._grid.grid_lines();
+    }
     //general
     update() {
         this._gui_instance.clear();
         this._gui_instance.draw_box();
+        this._gui_instance.draw_grid_lines();
         this._gui_instance.draw_origin();
         this._gui_instance.draw_connections(this._audio_processor_type == "fill");
         this._gui_instance.draw_anchors();
@@ -556,7 +612,7 @@ window.onload = () => {
         throw new Error("Failed to locate render button");
     }
     const settings = new Settings();
-    const director = new Director(settings, drawing_context, "fill");
+    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, "fill");
     canvas.onmousedown = director.mouse_down_handler.bind(director);
     canvas.onmousemove = director.mouse_move_handler.bind(director);
     canvas.onmouseup = director.mouse_up_handler.bind(director);
