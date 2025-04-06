@@ -13,6 +13,34 @@ function angle(point1: CartesianPoint, point2: CartesianPoint, origin: Cartesian
 	return Math.acos((vector1.x * vector2.x + vector1.y * vector2.y) / dist(point1, origin) / dist(point2, origin));
 }
 
+abstract class ProcessorNode
+{
+	protected _gain_node: GainNode;
+
+	public get exit_node(): AudioNode
+	{
+		return this._gain_node;
+	}
+	public abstract get enter_node(): AudioNode;
+
+	public automate_gain(amplitude: number, activated: boolean[], start: number, duration: number)
+	{
+		const gain_array = [];
+
+		for (let index = 0; index < activated.length; index++)
+		{
+			gain_array.push(activated[index] ? amplitude : 0);
+		}
+
+		this._gain_node.gain.setValueCurveAtTime(gain_array, start, duration);
+	}
+
+	public constructor(audio_context: AudioContext)
+	{
+		this._gain_node = audio_context.createGain();
+		this._gain_node.gain.value = 0;
+	}
+}
 interface AudioProcessor
 {
 	get current_time(): number;
@@ -31,7 +59,7 @@ class Settings
 	public fill: string = "white";
 	public shape_fill: string = "#ececec";
 	public stroke: string = "#0349fc";
-	public grid_stroke: string = "#ADD8E6";
+	public grid_stroke: string = "#add8e6";
 	public stroke_thickness: number = 1;
 }
 class Point
@@ -288,16 +316,11 @@ class Grid
 		this._director = director;
 	}
 }
-class LHPassFilter
+class LHPassFilter extends ProcessorNode
 {
 	private _low_pass: BiquadFilterNode[];
 	private _high_pass: BiquadFilterNode[];
-	private _gain_node: GainNode;
 
-	public get exit_node(): AudioNode
-	{
-		return this._gain_node;
-	}
 	public get enter_node(): AudioNode
 	{
 		return this._low_pass[0];
@@ -314,22 +337,10 @@ class LHPassFilter
 			filter.frequency.setValueCurveAtTime(high_pass, start, duration);
 		});
 	}
-	public automate_gain(amplitude: number, activated: boolean[], start: number, duration: number)
-	{
-		const gain_array = [];
-
-		for (let index = 0; index < activated.length; index++)
-		{
-			gain_array.push(activated[index] ? amplitude : 0);
-		}
-
-		this._gain_node.gain.setValueCurveAtTime(gain_array, start, duration);
-	}
 
 	public constructor(steep: number, audio_context: AudioContext)
 	{
-		this._gain_node = audio_context.createGain();
-		this._gain_node.gain.value = 0;
+		super(audio_context);
 		this._low_pass = [];
 		this._high_pass = [];
 
@@ -363,6 +374,34 @@ class LHPassFilter
 			prev = filter;
 		}
 		prev?.connect(this._gain_node);
+	}
+}
+class HarmonicOscilator extends ProcessorNode
+{
+	private _oscilator: OscillatorNode;
+
+	public get enter_node(): AudioNode
+	{
+		return this._oscilator;
+	}
+
+	public automate_frequency(frequencies: number[], start: number, duration: number)
+	{
+		this._oscilator.frequency.setValueCurveAtTime(frequencies, start, duration);
+	}
+	public activate(start: number, end: number)
+	{
+		this._oscilator.start(start);
+		this._oscilator.stop(end);
+	}
+
+	public constructor(audio_context: AudioContext)
+	{
+		super(audio_context);
+
+		this._oscilator = audio_context.createOscillator();
+		this._oscilator.type = "sine";
+		this._oscilator.connect(this._gain_node);
 	}
 }
 class GraphicalInterface
@@ -616,7 +655,7 @@ class FillAudioProcessor implements AudioProcessor
 		let last_nonzero_upper: number[] = [];
 		let counter = 0;
 
-		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.02)
+		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.01)
 		{
 			const caret_position = this._director.get_caret_position(time_stamp);
 			let intersections = shape.find_intersections({ a: 1, b: 0, c: -caret_position });
@@ -723,6 +762,168 @@ class FillAudioProcessor implements AudioProcessor
 	public constructor(director: Director)
 	{
 		this._filters = [];
+		this._audio_context = new AudioContext();
+		this._director = director;
+		this._rendering = false;
+		this._rendering_start = -1;
+	}
+}
+class OutlineAudioProcessor implements AudioProcessor
+{
+	private _oscilators: HarmonicOscilator[];
+	private _audio_context: AudioContext;
+	private _director: Director;
+	private _rendering: boolean;
+	private _rendering_start: number;
+
+	public get rendering(): boolean
+	{
+		return this._rendering;
+	}
+	public get current_time(): number
+	{
+		if (!this.rendering)
+		{
+			throw new Error("Unable to fetch current time unless render is running")
+		}
+
+		return this._audio_context.currentTime - this._rendering_start;
+	}
+
+	private detach()
+	{
+		this._oscilators.forEach((oscilator) =>
+		{
+			oscilator.exit_node.disconnect(this._audio_context.destination);
+		})
+	}
+	private add_oscilators(count: number)
+	{
+		for (let index = 0; index < count; index++)
+		{
+			const oscilator = new HarmonicOscilator(this._audio_context);
+
+			oscilator.exit_node.connect(this._audio_context.destination);
+			this._oscilators.push(oscilator);
+		}
+	}
+	private fill_gaps(array: number[][], last_non_zero: number[])
+	{
+		for (let index1 = 0; index1 < array.length; index1++)
+		{
+			for (let index2 = array[index1].length - 1; index2 >= 0; index2--)
+			{
+				if (array[index1][index2] != -1)
+				{
+					last_non_zero[index1] = array[index1][index2];
+				}
+				else
+				{
+					array[index1][index2] = last_non_zero[index1];
+				}
+			}
+		}
+	}
+	private transcribe_user_shape(shape: Polygon): { frequencies: number[][], activated: boolean[][] }
+	{
+		const frequencies: number[][] = [];
+		const last_nonzero: number[] = [];
+		const activated: boolean[][] = [];
+		let counter = 0;
+
+		for (let time_stamp = 0; time_stamp <= this._director.settings.rate; time_stamp += 0.01)
+		{
+			const caret_position = this._director.get_caret_position(time_stamp);
+			let intersections = shape.find_intersections({ a: 1, b: 0, c: -caret_position });
+
+			intersections.sort((a: CartesianPoint, b: CartesianPoint) =>
+			{
+				if (a.y < b.y) { return 1; }
+				else if (a.y > b.y) { return -1; }
+				else { return 0; }
+			});
+
+			//oscilators count compensation
+			if (intersections.length > this._oscilators.length)
+			{
+				const compensation = intersections.length - this._oscilators.length;
+				const frequency_array_placeholder = new Array<number>(counter);
+				const gain_array_placeholder = new Array<boolean>(counter);
+
+				frequency_array_placeholder.fill(-1, 0, counter);
+				gain_array_placeholder.fill(false, 0, counter);
+
+				for (let index = 0; index < compensation; index++)
+				{
+					frequencies.push(Array.from(frequency_array_placeholder));
+					activated.push(Array.from(gain_array_placeholder));
+
+					last_nonzero.push(0);
+				}
+
+				this.add_oscilators(compensation);
+			}
+
+			let oscilator_index = 0
+
+			while (oscilator_index < intersections.length)
+			{
+				const point = this._director.normalize_linear(intersections[oscilator_index].y);
+
+				last_nonzero[oscilator_index] = point;
+
+				frequencies[oscilator_index].push(point);
+				activated[oscilator_index].push(true);
+				oscilator_index++;
+			}
+
+			while (oscilator_index < this._oscilators.length)
+			{
+				frequencies[oscilator_index].push(-1);
+				activated[oscilator_index].push(false);
+				oscilator_index++;
+			}
+
+			counter++;
+		}
+
+		this.fill_gaps(frequencies, last_nonzero);
+
+		return { frequencies: frequencies, activated: activated };
+	}
+
+	public render()
+	{
+		const shape = this._director.shape;
+
+		this.detach();
+		this._oscilators = [];
+
+		const transcribed = this.transcribe_user_shape(shape);
+
+		for (let index = 0; index < this._oscilators.length; index++)
+		{
+			this._oscilators[index].automate_frequency(transcribed.frequencies[index], this._audio_context.currentTime, this._director.settings.rate);
+			this._oscilators[index].automate_gain(0.75 / this._oscilators.length, transcribed.activated[index], this._audio_context.currentTime, this._director.settings.rate);
+		}
+
+		for (let index = 0; index < this._oscilators.length; index++)
+		{
+			this._oscilators[index].activate(this._audio_context.currentTime, this._audio_context.currentTime + this._director.settings.rate);
+		}
+
+		this._rendering = true;
+		this._rendering_start = this._audio_context.currentTime;
+
+		setTimeout((() =>
+		{
+			this._rendering = false;
+		}).bind(this), this._director.settings.rate * 1000);
+	}
+
+	public constructor(director: Director)
+	{
+		this._oscilators = [];
 		this._audio_context = new AudioContext();
 		this._director = director;
 		this._rendering = false;
@@ -871,7 +1072,7 @@ class Director
 		this._shape = new Polygon();
 		this._grid = new Grid(partition, this);
 		this._audio_processor_type = audio_processor_type;
-		this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new FillAudioProcessor(this);
+		this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new OutlineAudioProcessor(this);
 		this._gui_instance = new GraphicalInterface(drawing_context, this);
 		this._ui_instance = new UserInterface(this);
 	}
@@ -904,7 +1105,7 @@ window.onload = () =>
 	}
 
 	const settings = new Settings();
-	const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, "fill");
+	const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, "outline");
 
 	canvas.onmousedown = director.mouse_down_handler.bind(director);
 	canvas.onmousemove = director.mouse_move_handler.bind(director);
