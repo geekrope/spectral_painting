@@ -262,8 +262,9 @@ class HarmonicOscilator extends ProcessorNode {
     automate_frequency(frequencies, start, duration) {
         this._oscilator.frequency.setValueCurveAtTime(frequencies, start, duration);
     }
-    start(time) {
-        this._oscilator.start(time);
+    activate(start, end) {
+        this._oscilator.start(start);
+        this._oscilator.stop(end);
     }
 }
 class GraphicalInterface {
@@ -588,11 +589,12 @@ class OutlineAudioProcessor {
                 this.add_oscilators(compensation);
             }
             let oscilator_index = 0;
-            for (; oscilator_index < intersections.length; oscilator_index++) {
+            while (oscilator_index < intersections.length) {
                 const point = this._director.normalize_linear(intersections[oscilator_index].y);
                 last_nonzero[oscilator_index] = point;
                 frequencies[oscilator_index].push(point);
                 activated[oscilator_index].push(true);
+                oscilator_index++;
             }
             while (oscilator_index < this._oscilators.length) {
                 frequencies[oscilator_index].push(-1);
@@ -614,7 +616,7 @@ class OutlineAudioProcessor {
             this._oscilators[index].automate_gain(0.75 / this._oscilators.length, transcribed.activated[index], this._audio_context.currentTime, this._director.settings.rate);
         }
         for (let index = 0; index < this._oscilators.length; index++) {
-            this._oscilators[index].start(this._audio_context.currentTime);
+            this._oscilators[index].activate(this._audio_context.currentTime, this._audio_context.currentTime + this._director.settings.rate);
         }
         this._rendering = true;
         this._rendering_start = this._audio_context.currentTime;
