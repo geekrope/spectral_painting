@@ -814,6 +814,8 @@ window.onload = () => {
     const drawing_context = canvas?.getContext("2d");
     const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
     const render_button = document.getElementById("renderbtn");
+    const params = new URLSearchParams(window.location.search);
+    const type = params.get("type") || "fill";
     if (!drawing_context) {
         throw new Error("Failed to get canvas drawing context");
     }
@@ -824,7 +826,7 @@ window.onload = () => {
         throw new Error("Failed to locate render button");
     }
     const settings = new Settings();
-    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, spectrum_drawing_context, "outline");
+    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, spectrum_drawing_context, type);
     canvas.onmousedown = director.mouse_down_handler.bind(director);
     canvas.onmousemove = director.mouse_move_handler.bind(director);
     canvas.onmouseup = director.mouse_up_handler.bind(director);
