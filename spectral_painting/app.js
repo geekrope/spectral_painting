@@ -36,6 +36,7 @@ class Settings {
         this.stroke = "#0349fc";
         this.grid_stroke = "#add8e6";
         this.stroke_thickness = 1;
+        this.spectrum_frame_size = 5;
     }
 }
 class Point {
@@ -267,6 +268,53 @@ class HarmonicOscilator extends ProcessorNode {
         this._oscilator.stop(end);
     }
 }
+class SpectrumData {
+    constructor(master, director) {
+        this._director = director;
+        this._last_update = -1;
+        this._analyser = new AnalyserNode(director.audio_context, { fftSize: 8192, minDecibels: -120, maxDecibels: 0 });
+        //this._analyser.connect(director.audio_context.destination);
+        master.connect(this._analyser);
+    }
+    get last_update() {
+        return this._last_update;
+    }
+    get analyser() {
+        return this._analyser;
+    }
+    get_frequency_data() {
+        const data = new Float32Array(this._analyser.frequencyBinCount);
+        this._analyser.getFloatFrequencyData(data);
+        this._last_update = this._director.current_time;
+        return data;
+    }
+}
+class SpectrumImager {
+    constructor(ctx, spectrum_data, director) {
+        this._ctx = ctx;
+        this._spectrum_data = spectrum_data;
+        this._director = director;
+    }
+    draw_spectrum() {
+        const last_update = this._spectrum_data.last_update == -1 ? 0 : this._spectrum_data.last_update;
+        const data = this._spectrum_data.get_frequency_data();
+        const current_time = this._director.current_time;
+        const settings = this._director.settings;
+        const x = Math.floor(this._ctx.canvas.width * (last_update % settings.spectrum_frame_size) / settings.spectrum_frame_size);
+        const width = Math.ceil(this._ctx.canvas.width * (current_time - last_update) / settings.spectrum_frame_size);
+        let prev_y = this._ctx.canvas.height;
+        data.forEach((amplitude, index) => {
+            const frequency = (index + 1) / this._spectrum_data.analyser.frequencyBinCount * this._director.audio_context.sampleRate;
+            const y = Math.floor(this._director.normalize_exponential(frequency) * this._ctx.canvas.height);
+            const normalised_amplitude = Math.max(0, 255 * (amplitude - this._spectrum_data.analyser.minDecibels) / (this._spectrum_data.analyser.maxDecibels - this._spectrum_data.analyser.minDecibels));
+            this._ctx.fillStyle = `rgb(${normalised_amplitude},${normalised_amplitude},0)`;
+            if (prev_y > y) {
+                this._ctx.fillRect(x, y, width, prev_y - y);
+                prev_y = y;
+            }
+        });
+    }
+}
 class GraphicalInterface {
     constructor(ctx, director) {
         this._ctx = ctx;
@@ -384,6 +432,8 @@ class FillAudioProcessor {
         this._steep = 12;
         this._filters = [];
         this._audio_context = new AudioContext();
+        this._master = new GainNode(this._audio_context, { gain: 1 });
+        this._master.connect(this._audio_context.destination);
         this._director = director;
         this._rendering = false;
         this._rendering_start = -1;
@@ -397,9 +447,15 @@ class FillAudioProcessor {
         }
         return this._audio_context.currentTime - this._rendering_start;
     }
+    get audio_context() {
+        return this._audio_context;
+    }
+    get master() {
+        return this._master;
+    }
     detach() {
         this._filters.forEach((filter) => {
-            filter.exit_node.disconnect(this._audio_context.destination);
+            filter.exit_node.disconnect(this._master);
         });
     }
     generate_noise(duration) {
@@ -416,7 +472,7 @@ class FillAudioProcessor {
     add_filters(count) {
         for (let index = 0; index < count; index++) {
             const filter = new LHPassFilter(this._steep, this._audio_context);
-            filter.exit_node.connect(this._audio_context.destination);
+            filter.exit_node.connect(this._master);
             this._filters.push(filter);
         }
     }
@@ -518,6 +574,8 @@ class OutlineAudioProcessor {
     constructor(director) {
         this._oscilators = [];
         this._audio_context = new AudioContext();
+        this._master = new GainNode(this._audio_context, { gain: 1 });
+        this._master.connect(this._audio_context.destination);
         this._director = director;
         this._rendering = false;
         this._rendering_start = -1;
@@ -531,15 +589,21 @@ class OutlineAudioProcessor {
         }
         return this._audio_context.currentTime - this._rendering_start;
     }
+    get audio_context() {
+        return this._audio_context;
+    }
+    get master() {
+        return this._master;
+    }
     detach() {
         this._oscilators.forEach((oscilator) => {
-            oscilator.exit_node.disconnect(this._audio_context.destination);
+            oscilator.exit_node.disconnect(this._master);
         });
     }
     add_oscilators(count) {
         for (let index = 0; index < count; index++) {
             const oscilator = new HarmonicOscilator(this._audio_context);
-            oscilator.exit_node.connect(this._audio_context.destination);
+            oscilator.exit_node.connect(this._master);
             this._oscilators.push(oscilator);
         }
     }
@@ -626,7 +690,7 @@ class OutlineAudioProcessor {
     }
 }
 class Director {
-    constructor(settings, partition, drawing_context, audio_processor_type) {
+    constructor(settings, partition, drawing_context, spectrum_drawing_context, audio_processor_type) {
         this._settings = settings;
         this._shape = new Polygon();
         this._grid = new Grid(partition, this);
@@ -634,12 +698,20 @@ class Director {
         this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new OutlineAudioProcessor(this);
         this._gui_instance = new GraphicalInterface(drawing_context, this);
         this._ui_instance = new UserInterface(this);
+        this._spectrum_data = new SpectrumData(this._audio_processor.master, this);
+        this._spectrum_imager = new SpectrumImager(spectrum_drawing_context, this._spectrum_data, this);
     }
     get settings() {
         return this._settings;
     }
     get shape() {
         return this._shape;
+    }
+    get audio_context() {
+        return this._audio_processor.audio_context;
+    }
+    get current_time() {
+        return this._audio_processor.current_time;
     }
     get rendering() {
         return this._audio_processor.rendering;
@@ -669,7 +741,7 @@ class Director {
         const bias = Math.log(this._settings.frequency_range.low) / Math.log(this._settings.frequency_range.high);
         const power = Math.log(value) / Math.log(this._settings.frequency_range.high);
         const ratio = -(power - bias) / (1 - bias) + 1;
-        return ratio * this._settings.box.height + this._settings.box.y;
+        return ratio;
     }
     //shape actions
     delete(index) {
@@ -717,6 +789,7 @@ class Director {
         this._gui_instance.draw_anchors();
         if (this.rendering) {
             this._gui_instance.draw_render_progress();
+            this._spectrum_imager.draw_spectrum();
         }
         requestAnimationFrame(this.update.bind(this));
     }
@@ -737,16 +810,21 @@ function resize(settings) {
 }
 window.onload = () => {
     const canvas = document.getElementById("cnvs");
+    const spectrum_canvas = document.getElementById("spectrum_cnvs");
     const drawing_context = canvas?.getContext("2d");
+    const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
     const render_button = document.getElementById("renderbtn");
     if (!drawing_context) {
         throw new Error("Failed to get canvas drawing context");
+    }
+    if (!spectrum_drawing_context) {
+        throw new Error("Failed to get spectrum canvas drawing context");
     }
     if (!render_button) {
         throw new Error("Failed to locate render button");
     }
     const settings = new Settings();
-    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, "outline");
+    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, spectrum_drawing_context, "outline");
     canvas.onmousedown = director.mouse_down_handler.bind(director);
     canvas.onmousemove = director.mouse_move_handler.bind(director);
     canvas.onmouseup = director.mouse_up_handler.bind(director);

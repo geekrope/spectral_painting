@@ -36,7 +36,7 @@ const low = 1;
 const high = ctx.sampleRate / 2;
 const height = 1080;
 function normalize_exponential(value) {
-    return (1 - Math.log(value + 1) / Math.log(high)) * height;
+    return (1 - Math.log(value + 1) / Math.log(high + 1)) * height;
 }
 function update() {
     const array = new Float32Array(analyser.frequencyBinCount);
@@ -45,7 +45,6 @@ function update() {
     array.forEach((f, i) => {
         const x = blockWidth * (ctx.currentTime - start);
         const y = normalize_exponential(i / analyser.frequencyBinCount * high);
-        console.log(y);
         const h = last - y;
         last = y;
         const l = 255 * (f - analyser.minDecibels) / (analyser.maxDecibels - analyser.minDecibels);

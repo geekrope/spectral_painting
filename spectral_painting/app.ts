@@ -41,10 +41,13 @@ abstract class ProcessorNode
 		this._gain_node.gain.value = 0;
 	}
 }
+
 interface AudioProcessor
 {
 	get current_time(): number;
 	get rendering(): boolean;
+	get audio_context(): AudioContext;
+	get master(): AudioNode;
 	render(shape: Polygon): void;
 }
 
@@ -61,7 +64,9 @@ class Settings
 	public stroke: string = "#0349fc";
 	public grid_stroke: string = "#add8e6";
 	public stroke_thickness: number = 1;
+	public spectrum_frame_size: number = 5;
 }
+
 class Point
 {
 	private _angle: number;
@@ -113,6 +118,7 @@ class Point
 		this._origin_y = origin_y;
 	}
 }
+
 class Polygon
 {
 	private _points: Point[];
@@ -263,6 +269,7 @@ class Polygon
 		this._points = [];
 	}
 }
+
 class Grid
 {
 	private _partition: { horizontal: number, vertical: number };
@@ -316,6 +323,7 @@ class Grid
 		this._director = director;
 	}
 }
+
 class LHPassFilter extends ProcessorNode
 {
 	private _low_pass: BiquadFilterNode[];
@@ -376,6 +384,7 @@ class LHPassFilter extends ProcessorNode
 		prev?.connect(this._gain_node);
 	}
 }
+
 class HarmonicOscilator extends ProcessorNode
 {
 	private _oscilator: OscillatorNode;
@@ -404,6 +413,82 @@ class HarmonicOscilator extends ProcessorNode
 		this._oscilator.connect(this._gain_node);
 	}
 }
+
+class SpectrumData
+{
+	private _analyser: AnalyserNode;
+	private _director: Director;
+	private _last_update: number;
+
+	public get last_update(): number
+	{
+		return this._last_update;
+	}
+	public get analyser(): AnalyserNode
+	{
+		return this._analyser;
+	}
+
+	public get_frequency_data(): Float32Array
+	{
+		const data = new Float32Array(this._analyser.frequencyBinCount);
+
+		this._analyser.getFloatFrequencyData(data);
+		this._last_update = this._director.current_time;
+
+		return data;
+	}
+
+	public constructor(master: AudioNode, director: Director)
+	{
+		this._director = director;
+		this._last_update = -1;
+		this._analyser = new AnalyserNode(director.audio_context, { fftSize: 8192, minDecibels: -120, maxDecibels: 0 });
+		//this._analyser.connect(director.audio_context.destination);
+		master.connect(this._analyser);
+	}
+}
+
+class SpectrumImager
+{
+	private _ctx: CanvasRenderingContext2D;
+	private _spectrum_data: SpectrumData;
+	private _director: Director;
+
+	public draw_spectrum()
+	{
+		const last_update = this._spectrum_data.last_update == -1 ? 0 : this._spectrum_data.last_update;
+		const data = this._spectrum_data.get_frequency_data();
+		const current_time = this._director.current_time;
+		const settings = this._director.settings;
+		const x = Math.floor(this._ctx.canvas.width * (last_update % settings.spectrum_frame_size) / settings.spectrum_frame_size);
+		const width = Math.ceil(this._ctx.canvas.width * (current_time - last_update) / settings.spectrum_frame_size);
+		let prev_y = this._ctx.canvas.height;
+
+		data.forEach((amplitude, index) =>
+		{
+			const frequency = (index + 1) / this._spectrum_data.analyser.frequencyBinCount * this._director.audio_context.sampleRate;
+			const y = Math.floor(this._director.normalize_exponential(frequency) * this._ctx.canvas.height);
+			const normalised_amplitude = Math.max(0, 255 * (amplitude - this._spectrum_data.analyser.minDecibels) / (this._spectrum_data.analyser.maxDecibels - this._spectrum_data.analyser.minDecibels));
+
+			this._ctx.fillStyle = `rgb(${normalised_amplitude},${normalised_amplitude},0)`;
+
+			if (prev_y > y)
+			{
+				this._ctx.fillRect(x, y, width, prev_y - y);
+				prev_y = y;
+			}
+		});
+	}
+
+	public constructor(ctx: CanvasRenderingContext2D, spectrum_data: SpectrumData, director: Director)
+	{
+		this._ctx = ctx;
+		this._spectrum_data = spectrum_data;
+		this._director = director;
+	}
+}
+
 class GraphicalInterface
 {
 	private _ctx: CanvasRenderingContext2D;
@@ -528,6 +613,7 @@ class GraphicalInterface
 		this._director = director;
 	}
 }
+
 class UserInterface
 {
 	private _selected_anchor: number;
@@ -572,10 +658,12 @@ class UserInterface
 		this._director = director;
 	}
 }
+
 class FillAudioProcessor implements AudioProcessor
 {
 	private _steep: number = 12;
 	private _filters: LHPassFilter[];
+	private _master: GainNode;
 	private _audio_context: AudioContext;
 	private _director: Director;
 	private _rendering: boolean;
@@ -594,12 +682,20 @@ class FillAudioProcessor implements AudioProcessor
 
 		return this._audio_context.currentTime - this._rendering_start;
 	}
+	public get audio_context(): AudioContext
+	{
+		return this._audio_context;
+	}
+	public get master(): AudioNode
+	{
+		return this._master;
+	}
 
 	private detach()
 	{
 		this._filters.forEach((filter) =>
 		{
-			filter.exit_node.disconnect(this._audio_context.destination);
+			filter.exit_node.disconnect(this._master);
 		})
 	}
 	private generate_noise(duration: number): AudioBufferSourceNode
@@ -624,7 +720,7 @@ class FillAudioProcessor implements AudioProcessor
 		{
 			const filter = new LHPassFilter(this._steep, this._audio_context);
 
-			filter.exit_node.connect(this._audio_context.destination);
+			filter.exit_node.connect(this._master);
 			this._filters.push(filter);
 		}
 	}
@@ -763,15 +859,19 @@ class FillAudioProcessor implements AudioProcessor
 	{
 		this._filters = [];
 		this._audio_context = new AudioContext();
+		this._master = new GainNode(this._audio_context, { gain: 1 });
+		this._master.connect(this._audio_context.destination);
 		this._director = director;
 		this._rendering = false;
 		this._rendering_start = -1;
 	}
 }
+
 class OutlineAudioProcessor implements AudioProcessor
 {
 	private _oscilators: HarmonicOscilator[];
 	private _audio_context: AudioContext;
+	private _master: GainNode;
 	private _director: Director;
 	private _rendering: boolean;
 	private _rendering_start: number;
@@ -789,12 +889,20 @@ class OutlineAudioProcessor implements AudioProcessor
 
 		return this._audio_context.currentTime - this._rendering_start;
 	}
+	public get audio_context(): AudioContext
+	{
+		return this._audio_context;
+	}
+	public get master(): AudioNode
+	{
+		return this._master;
+	}
 
 	private detach()
 	{
 		this._oscilators.forEach((oscilator) =>
 		{
-			oscilator.exit_node.disconnect(this._audio_context.destination);
+			oscilator.exit_node.disconnect(this._master);
 		})
 	}
 	private add_oscilators(count: number)
@@ -803,7 +911,7 @@ class OutlineAudioProcessor implements AudioProcessor
 		{
 			const oscilator = new HarmonicOscilator(this._audio_context);
 
-			oscilator.exit_node.connect(this._audio_context.destination);
+			oscilator.exit_node.connect(this._master);
 			this._oscilators.push(oscilator);
 		}
 	}
@@ -925,17 +1033,22 @@ class OutlineAudioProcessor implements AudioProcessor
 	{
 		this._oscilators = [];
 		this._audio_context = new AudioContext();
+		this._master = new GainNode(this._audio_context, { gain: 1 });
+		this._master.connect(this._audio_context.destination);
 		this._director = director;
 		this._rendering = false;
 		this._rendering_start = -1;
 	}
 }
+
 class Director
 {
 	private _settings: Settings;
 	private _shape: Polygon;
 	private _grid: Grid;
 	private _audio_processor: AudioProcessor;
+	private _spectrum_data: SpectrumData;
+	private _spectrum_imager: SpectrumImager;
 	private _gui_instance: GraphicalInterface;
 	private _ui_instance: UserInterface;
 	private _audio_processor_type: AudioProcessorType;
@@ -947,6 +1060,14 @@ class Director
 	public get shape(): Polygon
 	{
 		return this._shape;
+	}
+	public get audio_context(): AudioContext
+	{
+		return this._audio_processor.audio_context;
+	}
+	public get current_time(): number
+	{
+		return this._audio_processor.current_time;
 	}
 	public get rendering(): boolean
 	{
@@ -991,7 +1112,7 @@ class Director
 		const power = Math.log(value) / Math.log(this._settings.frequency_range.high);
 		const ratio = -(power - bias) / (1 - bias) + 1;
 
-		return ratio * this._settings.box.height + this._settings.box.y;
+		return ratio;
 	}
 	//shape actions
 	public delete(index: number)
@@ -1053,6 +1174,7 @@ class Director
 		if (this.rendering)
 		{
 			this._gui_instance.draw_render_progress();
+			this._spectrum_imager.draw_spectrum();
 		}
 
 		requestAnimationFrame(this.update.bind(this));
@@ -1066,7 +1188,7 @@ class Director
 		this._audio_processor.render(this.shape);
 	}
 
-	public constructor(settings: Settings, partition: { horizontal: number, vertical: number }, drawing_context: CanvasRenderingContext2D, audio_processor_type: AudioProcessorType)
+	public constructor(settings: Settings, partition: { horizontal: number, vertical: number }, drawing_context: CanvasRenderingContext2D, spectrum_drawing_context: CanvasRenderingContext2D, audio_processor_type: AudioProcessorType)
 	{
 		this._settings = settings;
 		this._shape = new Polygon();
@@ -1075,6 +1197,8 @@ class Director
 		this._audio_processor = audio_processor_type == "fill" ? new FillAudioProcessor(this) : new OutlineAudioProcessor(this);
 		this._gui_instance = new GraphicalInterface(drawing_context, this);
 		this._ui_instance = new UserInterface(this);
+		this._spectrum_data = new SpectrumData(this._audio_processor.master, this);
+		this._spectrum_imager = new SpectrumImager(spectrum_drawing_context, this._spectrum_data, this);
 	}
 }
 
@@ -1092,12 +1216,18 @@ function resize(this: HTMLCanvasElement, settings: Settings)
 window.onload = () =>
 {
 	const canvas = document.getElementById("cnvs") as HTMLCanvasElement;
+	const spectrum_canvas = document.getElementById("spectrum_cnvs") as HTMLCanvasElement;
 	const drawing_context = canvas?.getContext("2d");
+	const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
 	const render_button = document.getElementById("renderbtn");
 
 	if (!drawing_context)
 	{
 		throw new Error("Failed to get canvas drawing context");
+	}
+	if (!spectrum_drawing_context)
+	{
+		throw new Error("Failed to get spectrum canvas drawing context");
 	}
 	if (!render_button)
 	{
@@ -1105,7 +1235,7 @@ window.onload = () =>
 	}
 
 	const settings = new Settings();
-	const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, "outline");
+	const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, spectrum_drawing_context, "outline");
 
 	canvas.onmousedown = director.mouse_down_handler.bind(director);
 	canvas.onmousemove = director.mouse_move_handler.bind(director);

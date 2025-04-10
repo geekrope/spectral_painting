@@ -1,15 +1,21 @@
 ﻿#renderbtn {
     width: 100px;
     height: 40px;
-    position:absolute;
+    position: absolute;
 }
 
 #cnvs {
     padding: 0;
     position: absolute;
-    padding:0;
+    padding: 0;
 }
 
-body{
+#spectrum_cnvs {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+}
+
+body {
     overflow: hidden;
 }
