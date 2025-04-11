@@ -800,13 +800,64 @@ class Director {
         this._audio_processor.render(this.shape);
     }
 }
-function resize(settings) {
+let spectrum_width_ajdustment = false;
+let spectrum_height_ajdustment = false;
+const spectrum_margin = 5;
+function resize_main(settings) {
     const cnvs = this;
     cnvs.width = window.innerWidth;
     cnvs.height = window.innerHeight;
     const padding = 50;
     settings.box = { x: padding, y: padding, width: cnvs.width - 2 * padding, height: cnvs.height - 2 * padding };
     settings.origin = { x: cnvs.width / 2, y: cnvs.height / 2 };
+}
+function mousedown_spectrum(args) {
+    spectrum_width_ajdustment = args.offsetX < spectrum_margin;
+    spectrum_height_ajdustment = args.offsetY < spectrum_margin;
+}
+function spectrum_cursor_update(args) {
+    if (spectrum_width_ajdustment || spectrum_height_ajdustment) {
+        return;
+    }
+    if (args.offsetX < spectrum_margin && args.offsetY < spectrum_margin) {
+        this.style.cursor = "nw-resize";
+    }
+    else if (args.offsetX < spectrum_margin) {
+        this.style.cursor = "w-resize";
+    }
+    else if (args.offsetY < spectrum_margin) {
+        this.style.cursor = "n-resize";
+    }
+    else {
+        this.style.cursor = "default";
+    }
+}
+function mouseleave_spectrum(_args) {
+    if (spectrum_width_ajdustment || spectrum_height_ajdustment) {
+        return;
+    }
+    this.style.cursor = "default";
+}
+function mousemove_spectrum(args) {
+    const min_width = 200;
+    const min_height = 100;
+    const box = this.getBoundingClientRect();
+    if (spectrum_width_ajdustment) {
+        this.width = Math.max(box.right - args.clientX, min_width);
+        args.stopPropagation();
+    }
+    if (spectrum_height_ajdustment) {
+        this.height = Math.max(box.bottom - args.clientY, min_height);
+        args.stopPropagation();
+    }
+}
+function mouseup_spectrum(args) {
+    if (spectrum_width_ajdustment || spectrum_height_ajdustment) {
+        spectrum_width_ajdustment = false;
+        spectrum_height_ajdustment = false;
+        this.style.cursor = "default";
+        args.stopPropagation();
+    }
 }
 window.onload = () => {
     const canvas = document.getElementById("cnvs");
@@ -826,14 +877,19 @@ window.onload = () => {
         throw new Error("Failed to locate render button");
     }
     const settings = new Settings();
-    const director = new Director(settings, { horizontal: 24, vertical: 12 }, drawing_context, spectrum_drawing_context, type);
+    const director = new Director(settings, { horizontal: 48, vertical: 24 }, drawing_context, spectrum_drawing_context, type);
     canvas.onmousedown = director.mouse_down_handler.bind(director);
     canvas.onmousemove = director.mouse_move_handler.bind(director);
     canvas.onmouseup = director.mouse_up_handler.bind(director);
-    resize.call(canvas, settings);
+    spectrum_canvas.onmousedown = mousedown_spectrum.bind(spectrum_canvas);
+    spectrum_canvas.onmousemove = spectrum_cursor_update.bind(spectrum_canvas);
+    spectrum_canvas.onmouseleave = mouseleave_spectrum.bind(spectrum_canvas);
+    window.addEventListener("mousemove", mousemove_spectrum.bind(spectrum_canvas));
+    window.addEventListener("mouseup", mouseup_spectrum.bind(spectrum_canvas));
+    resize_main.call(canvas, settings);
     director.update();
     render_button.onclick = () => {
         director.render.call(director);
     };
-    window.onresize = resize.bind(canvas, settings);
+    window.onresize = resize_main.bind(canvas, settings);
 };
