@@ -799,6 +799,25 @@ class Director {
         }
         this._audio_processor.render(this.shape);
     }
+    serialize() {
+        const data = JSON.stringify(this._shape.points.map(point => ({
+            angle: point.angle,
+            radius: point.radius,
+            origin_x: point.origin_x,
+            origin_y: point.origin_y
+        })));
+        return btoa(data);
+    }
+    static deserialize(data) {
+        const json = atob(data);
+        const polygon = new Polygon();
+        const pointsData = JSON.parse(json);
+        pointsData.forEach((data) => {
+            const point = Point.from_polar(data.angle, data.radius, data.origin_x, data.origin_y);
+            polygon.insert(point);
+        });
+        return polygon;
+    }
 }
 let spectrum_width_ajdustment = false;
 let spectrum_height_ajdustment = false;
@@ -865,6 +884,7 @@ window.onload = () => {
     const drawing_context = canvas?.getContext("2d");
     const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
     const render_button = document.getElementById("renderbtn");
+    const copy_button = document.getElementById("copybtn");
     const params = new URLSearchParams(window.location.search);
     const type = params.get("type") || "fill";
     if (!drawing_context) {
@@ -891,5 +911,11 @@ window.onload = () => {
     render_button.onclick = () => {
         director.render.call(director);
     };
+    if (copy_button) {
+        copy_button.onclick = () => {
+          const data = `${window.location.href}index.html#${director.serialize()}`;
+          navigator.clipboard.writeText(data);
+        };
+    }
     window.onresize = resize_main.bind(canvas, settings);
 };

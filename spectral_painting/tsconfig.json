@@ -23,7 +23,8 @@
     "suppressExcessPropertyErrors": false,
     //"suppressImplicitAnyIndexErrors": false,
     "noStrictGenericChecks": false,
-    "target": "es2021"
+    "target": "es2021",
+    "moduleResolution": "node"
   },
   "exclude": [
     "node_modules",

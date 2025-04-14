@@ -1189,6 +1189,31 @@ class Director
 		this._audio_processor.render(this.shape);
 	}
 
+	public serialize(): string
+	{
+		const data = JSON.stringify(this._shape.points.map(point => ({
+			angle: point.angle,
+			radius: point.radius,
+			origin_x: point.origin_x,
+			origin_y: point.origin_y
+		})));
+
+		return btoa(data);
+	}
+
+	public static deserialize(data: string): Polygon
+	{
+		const json = atob(data);
+		const polygon = new Polygon();
+		const pointsData = JSON.parse(json);
+		pointsData.forEach((data: { angle: number; radius: number; origin_x: number; origin_y: number }) =>
+		{
+			const point = Point.from_polar(data.angle, data.radius, data.origin_x, data.origin_y);
+			polygon.insert(point);
+		});
+		return polygon;
+	}
+
 	public constructor(settings: Settings, partition: { horizontal: number, vertical: number }, drawing_context: CanvasRenderingContext2D, spectrum_drawing_context: CanvasRenderingContext2D, audio_processor_type: AudioProcessorType)
 	{
 		this._settings = settings;
@@ -1290,6 +1315,7 @@ window.onload = () =>
 	const drawing_context = canvas?.getContext("2d");
 	const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
 	const render_button = document.getElementById("renderbtn");
+	const copy_button = document.getElementById("copybtn");
 	const params = new URLSearchParams(window.location.search);
 	const type = params.get("type") || "fill";
 
@@ -1326,6 +1352,15 @@ window.onload = () =>
 	{
 		director.render.call(director);
 	};
+
+	if (copy_button)
+	{
+		copy_button.onclick = () =>
+		{
+			const data = `${window.location.href}/${director.serialize()}`;
+			navigator.clipboard.writeText(data);
+		};
+	}
 
 	window.onresize = resize_main.bind(canvas, settings);
 }
