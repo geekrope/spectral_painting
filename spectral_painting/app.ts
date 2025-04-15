@@ -1189,6 +1189,32 @@ class Director
 		this._audio_processor.render(this.shape);
 	}
 
+	public serialize(): string
+	{
+		const data = JSON.stringify(this._shape.points.map(point => ({
+			a: point.angle,
+			r: point.radius,
+			x: point.origin_x,
+			y: point.origin_y
+		})));
+
+		const string = btoa(data);
+    return string;
+	}
+
+	public deserialize(data: string): void
+	{
+		const json = atob(data);
+		const polygon = new Polygon();
+		const pointsData = JSON.parse(json);
+		pointsData.forEach((data: { a: number; r: number; x: number; y: number }) =>
+		{
+			const point = Point.from_polar(data.a, data.r, data.x, data.y);
+			polygon.insert(point);
+		});
+		this._shape = polygon;
+	}
+
 	public constructor(settings: Settings, partition: { horizontal: number, vertical: number }, drawing_context: CanvasRenderingContext2D, spectrum_drawing_context: CanvasRenderingContext2D, audio_processor_type: AudioProcessorType)
 	{
 		this._settings = settings;
@@ -1290,6 +1316,7 @@ window.onload = () =>
 	const drawing_context = canvas?.getContext("2d");
 	const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
 	const render_button = document.getElementById("renderbtn");
+	const share_button = document.getElementById("sharebtn");
 	const params = new URLSearchParams(window.location.search);
 	const type = params.get("type") || "fill";
 
@@ -1320,12 +1347,40 @@ window.onload = () =>
 	window.addEventListener("mouseup", mouseup_spectrum.bind(spectrum_canvas));
 
 	resize_main.call(canvas, settings);
+
+	const initial_href = new URL(window.location.href);
+	if (initial_href.hash)
+	{
+    director.deserialize(initial_href.hash.substring(1));
+	}
+
 	director.update();
 
 	render_button.onclick = () =>
 	{
 		director.render.call(director);
 	};
+
+	if (share_button)
+	{
+		share_button.onclick = async () =>
+		{
+			try
+			{
+				const href = initial_href.href.replace(initial_href.hash, ``);
+				const link = `${href}#${director.serialize()}`;
+				const text_to_copy = window.prompt("Copy the following link:", link);
+				if (text_to_copy)
+				{
+					await navigator.clipboard.writeText(link);
+				}
+			}
+      catch (error)
+			{
+				alert(`Failed to copy link: ${error}`);
+      }
+		};
+	}
 
 	window.onresize = resize_main.bind(canvas, settings);
 }

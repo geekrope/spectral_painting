@@ -799,6 +799,26 @@ class Director {
         }
         this._audio_processor.render(this.shape);
     }
+    serialize() {
+        const data = JSON.stringify(this._shape.points.map(point => ({
+            a: point.angle,
+            r: point.radius,
+            x: point.origin_x,
+            y: point.origin_y
+        })));
+        const string = btoa(data);
+        return string;
+    }
+    deserialize(data) {
+        const json = atob(data);
+        const polygon = new Polygon();
+        const pointsData = JSON.parse(json);
+        pointsData.forEach((data) => {
+            const point = Point.from_polar(data.a, data.r, data.x, data.y);
+            polygon.insert(point);
+        });
+        this._shape = polygon;
+    }
 }
 let spectrum_width_ajdustment = false;
 let spectrum_height_ajdustment = false;
@@ -865,6 +885,7 @@ window.onload = () => {
     const drawing_context = canvas?.getContext("2d");
     const spectrum_drawing_context = spectrum_canvas?.getContext("2d");
     const render_button = document.getElementById("renderbtn");
+    const share_button = document.getElementById("sharebtn");
     const params = new URLSearchParams(window.location.search);
     const type = params.get("type") || "fill";
     if (!drawing_context) {
@@ -887,9 +908,28 @@ window.onload = () => {
     window.addEventListener("mousemove", mousemove_spectrum.bind(spectrum_canvas));
     window.addEventListener("mouseup", mouseup_spectrum.bind(spectrum_canvas));
     resize_main.call(canvas, settings);
+    const initial_href = new URL(window.location.href);
+    if (initial_href.hash) {
+        director.deserialize(initial_href.hash.substring(1));
+    }
     director.update();
     render_button.onclick = () => {
         director.render.call(director);
     };
+    if (share_button) {
+        share_button.onclick = async () => {
+            try {
+                const href = initial_href.href.replace(initial_href.hash, ``);
+                const link = `${href}#${director.serialize()}`;
+                const text_to_copy = window.prompt("Copy the following link:", link);
+                if (text_to_copy) {
+                    await navigator.clipboard.writeText(link);
+                }
+            }
+            catch (error) {
+                alert(`Failed to copy link: ${error}`);
+            }
+        };
+    }
     window.onresize = resize_main.bind(canvas, settings);
 };
