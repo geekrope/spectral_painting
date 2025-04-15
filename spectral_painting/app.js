@@ -919,7 +919,8 @@ window.onload = () => {
     if (share_button) {
         share_button.onclick = async () => {
             try {
-                const link = `${initial_href.origin}#${director.serialize()}`;
+                const href = initial_href.href.replace(initial_href.hash, ``);
+                const link = `${href}#${director.serialize()}`;
                 const text_to_copy = window.prompt("Copy the following link:", link);
                 if (text_to_copy) {
                     await navigator.clipboard.writeText(link);
